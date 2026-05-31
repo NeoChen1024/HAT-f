@@ -1,30 +1,20 @@
 #!/usr/bin/env python
-
-from setuptools import find_packages, setup
-
 import os
 import subprocess
 import time
 
+from setuptools import setup
+
 version_file = 'hat/version.py'
 
 
-def readme():
-    with open('README.md', encoding='utf-8') as f:
-        content = f.read()
-    return content
-
-
 def get_git_hash():
-
     def _minimal_ext_cmd(cmd):
-        # construct minimal environment
         env = {}
         for k in ['SYSTEMROOT', 'PATH', 'HOME']:
             v = os.environ.get(k)
             if v is not None:
                 env[k] = v
-        # LANGUAGE is used on win32
         env['LANGUAGE'] = 'C'
         env['LANG'] = 'C'
         env['LC_ALL'] = 'C'
@@ -45,7 +35,6 @@ def get_hash():
         sha = get_git_hash()[:7]
     else:
         sha = 'unknown'
-
     return sha
 
 
@@ -67,41 +56,11 @@ version_info = ({})
 
 
 def get_version():
+    ns = {}
     with open(version_file, 'r') as f:
-        exec(compile(f.read(), version_file, 'exec'))
-    return locals()['__version__']
+        exec(compile(f.read(), version_file, 'exec'), ns)
+    return ns['__version__']
 
 
-def get_requirements(filename='requirements.txt'):
-    here = os.path.dirname(os.path.realpath(__file__))
-    with open(os.path.join(here, filename), 'r') as f:
-        requires = [line.replace('\n', '') for line in f.readlines()]
-    return requires
-
-
-if __name__ == '__main__':
-    write_version_py()
-    setup(
-        name='hat',
-        version=get_version(),
-        description='HAT',
-        long_description=readme(),
-        long_description_content_type='text/markdown',
-        author='Xiangyu Chen',
-        author_email='chxy95@gmail.com',
-        keywords='computer vision, pytorch, basicsr, image restoration, super-resolution',
-        url='https://github.com/chxy95/HAT',
-        include_package_data=True,
-        packages=find_packages(exclude=('options', 'datasets', 'experiments', 'results', 'tb_logger', 'wandb')),
-        classifiers=[
-            'Development Status :: 4 - Beta',
-            'License :: OSI Approved :: Apache Software License',
-            'Operating System :: OS Independent',
-            'Programming Language :: Python :: 3',
-            'Programming Language :: Python :: 3.7',
-            'Programming Language :: Python :: 3.8',
-        ],
-        license='MIT License',
-        setup_requires=['cython', 'numpy'],
-        install_requires=get_requirements(),
-        zip_safe=False)
+write_version_py()
+setup(version=get_version())
