@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark HAT SRx4 training step speed.
+"""Benchmark HAT SRx4 training step speed with torch.compile.
 
 Config: HAT base (embed_dim=180, window_size=16, depths=6x6, gt_size=256, batch=4).
 Measures full training step: forward → loss → backward → optimizer.step → EMA update.
-Tests: fp32 + AMP, torch.compile on/off (dynamic=False).
+Tests: AMP + torch.compile, activation checkpointing, channels_last memory format.
 """
 import sys
 import time
@@ -23,14 +23,14 @@ SCALE = 4
 LQ_SIZE = GT_SIZE // SCALE  # 64
 
 
-def build_model():
+def build_model(use_checkpoint):
     return HAT(
         img_size=64, patch_size=1, in_chans=3, embed_dim=180,
         depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
         window_size=16, compress_ratio=3, squeeze_factor=30,
         conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2,
         upscale=4, upsampler='pixelshuffle', resi_connection='1conv',
-        img_range=1.0,
+        img_range=1.0, use_checkpoint=use_checkpoint,
     )
 
 
@@ -49,29 +49,30 @@ def update_ema(net_g, net_ema, decay=0.999):
         ep.data.mul_(decay).add_(gp.data, alpha=1 - decay)
 
 
-def bench(use_compile, use_amp):
-    precision = "AMP" if use_amp else "fp32"
-    mode = "compile" if use_compile else "eager"
-    header = f"  {mode:>7s}  {precision:>4s}"
+def bench(use_checkpoint, use_channels_last):
+    ckpt_label = "ckpt" if use_checkpoint else "no_ckpt"
+    fmt_label = "NHWC" if use_channels_last else "NCHW"
+    header = f"  compile  AMP  {ckpt_label:>7s}  {fmt_label}"
 
     torch.manual_seed(42)
-    model = build_model().cuda()
+    model = build_model(use_checkpoint).cuda()
     net_ema = build_ema(model).cuda()
     criterion = nn.L1Loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, betas=(0.9, 0.99))
-    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=True)
 
-    if use_compile:
-        print(f"{header}  compiling...", flush=True)
-        model = torch.compile(model, dynamic=False)
+    model = torch.compile(model, dynamic=False)
 
     torch.manual_seed(1)
     lq = torch.randn(BATCH, 3, LQ_SIZE, LQ_SIZE, device='cuda')
     gt = torch.randn(BATCH, 3, GT_SIZE, GT_SIZE, device='cuda')
+    if use_channels_last:
+        lq = lq.to(memory_format=torch.channels_last)
+        gt = gt.to(memory_format=torch.channels_last)
 
     def step():
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast('cuda', enabled=use_amp):
+        with torch.autocast('cuda'):
             output = model(lq)
             loss = criterion(output, gt)
         scaler.scale(loss).backward()
@@ -79,10 +80,10 @@ def bench(use_compile, use_amp):
         scaler.update()
         update_ema(model, net_ema)
 
-    # warmup
+    # warmup (first step triggers compilation)
     for i in range(1, WARMUP + 1):
-        if use_compile and i == 1:
-            t0 = time.perf_counter()
+        if i == 1:
+            print(f"{header}  compiling...", flush=True)
 
         torch.cuda.synchronize()
         t = time.perf_counter()
@@ -90,8 +91,8 @@ def bench(use_compile, use_amp):
         torch.cuda.synchronize()
         ms = (time.perf_counter() - t) * 1000
 
-        if use_compile and i == 1:
-            print(f"    warmup [compiled in {ms/1000:.0f}s]  step {i:>2d}/{WARMUP}: {ms:8.0f} ms", flush=True)
+        if i == 1:
+            print(f"    compile {ms/1000:4.0f}s  warmup {i:>2d}/{WARMUP}: {ms:8.0f} ms", flush=True)
         else:
             print(f"    {'warmup':>28s}  step {i:>2d}/{WARMUP}: {ms:8.0f} ms", flush=True)
 
@@ -114,9 +115,7 @@ def bench(use_compile, use_amp):
     del model, net_ema, optimizer, scaler, lq, gt
     torch.cuda.empty_cache()
 
-    first = times[0]
-    last = times[-1]
-    print(f"    {'bench':>28s}  avg: {avg_ms:7.0f} ms | min: {min_ms:7.0f} ms | max: {max_ms:7.0f} ms | first: {first:7.0f} ms | last: {last:7.0f} ms | peak: {mem_mb:6.0f} MB", flush=True)
+    print(f"    {'bench':>28s}  avg: {avg_ms:7.0f} ms | min: {min_ms:7.0f} ms | max: {max_ms:7.0f} ms | peak: {mem_mb:6.0f} MB", flush=True)
     print(flush=True)
     return avg_ms
 
@@ -131,27 +130,28 @@ def main():
     device_name = torch.cuda.get_device_name(0)
     print(f"GPU: {device_name}", flush=True)
     print(f"Config: HAT SRx4, embed_dim=180, window_size=16, depths=6x6, heads=6", flush=True)
-    print(f"        gt_size={GT_SIZE}, batch={BATCH}, L1Loss, Adam+EMA", flush=True)
+    print(f"        gt_size={GT_SIZE}, batch={BATCH}, L1Loss, Adam+EMA, AMP, torch.compile", flush=True)
     print(f"        warmup={WARMUP}, timing={TIMING} iters each", flush=True)
     print(flush=True)
 
     results = {}
-    for use_amp in [False, True]:
-        for use_compile in [False, True]:
-            key = ('fp32' if not use_amp else 'AMP', 'compile' if use_compile else 'eager')
-            results[key] = bench(use_compile=use_compile, use_amp=use_amp)
+    for use_checkpoint in [False, True]:
+        for use_channels_last in [False, True]:
+            key = ('ckpt' if use_checkpoint else 'no_ckpt',
+                   'NHWC' if use_channels_last else 'NCHW')
+            results[key] = bench(use_checkpoint, use_channels_last)
 
-    fp32_eager = results[('fp32', 'eager')]
-    fp32_compile = results[('fp32', 'compile')]
-    amp_eager = results[('AMP', 'eager')]
-    amp_compile = results[('AMP', 'compile')]
-
+    # summary
     print(f"{'='*72}", flush=True)
-    print("Summary (avg ms/step, lower is better):", flush=True)
-    print(f"{'':>12} {'eager':>10} {'compile':>10} {'speedup':>10}", flush=True)
-    print(f"  {'fp32':>8} {fp32_eager:10.0f} {fp32_compile:10.0f} {fp32_eager/fp32_compile:9.2f}x", flush=True)
-    print(f"  {'AMP':>8} {amp_eager:10.0f} {amp_compile:10.0f} {amp_eager/amp_compile:9.2f}x", flush=True)
-    print(f"  {'AMP/spd':>8} {fp32_eager/amp_eager:9.2f}x {fp32_compile/amp_compile:9.2f}x", flush=True)
+    print("Summary (avg ms/step, lower is better) — all AMP + torch.compile:", flush=True)
+    print(flush=True)
+    print(f"  {'':<15} {'NCHW':>12} {'NHWC':>12}", flush=True)
+    print(f"  {'no checkpoint':<15} {results[('no_ckpt','NCHW')]:12.0f} {results[('no_ckpt','NHWC')]:12.0f}", flush=True)
+    print(f"  {'checkpoint':<15} {results[('ckpt','NCHW')]:12.0f} {results[('ckpt','NHWC')]:12.0f}", flush=True)
+    print(flush=True)
+
+    best_key = min(results, key=results.get)
+    print(f"  Best: {best_key[0]} + {best_key[1]}: {results[best_key]:.0f} ms/step", flush=True)
 
 
 if __name__ == '__main__':

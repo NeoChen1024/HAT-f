@@ -90,6 +90,27 @@ every call due to a CPU→CUDA dispatch key guard failure.
 Precision tip: set `torch.set_float32_matmul_precision('high')` before training to allow
 TF32 tensor cores, which gives a further ~10% speedup on Ampere/Ada GPUs.
 
+### Benchmark results (RTX 4080 SUPER, HAT SRx4, gt_size=256, batch=4, AMP)
+
+Run: `python3 scripts/bench_train_speed.py`
+
+| | NCHW | NHWC |
+|---|---|---|
+| no checkpoint | 182 ms | 178 ms |
+| checkpoint | 177 ms | 177 ms |
+
+- **`torch.compile` gives ~1.8x speedup** over eager mode (321→182 ms for NCHW no-ckpt).
+- **FP32 vs AMP gap is small** (~1.13x) because HAT is attention-heavy (small matmul inner dims,
+  lots of memory-bound ops like window partition, softmax, gather) rather than conv/GEMM bound.
+- **Activation checkpointing (`use_checkpoint=True`) is slightly faster** (~3%, 182→177 ms).
+  HAT's attention intermediate activations (W-MSA scores, OCAB scores) are large; checkpointing
+  recomputes them during backward instead of saving/loading them from VRAM. On Ada GPUs the
+  FP16 tensor core throughput (~300 TFLOPS) far exceeds memory bandwidth (~736 GB/s), so
+  recompute wins over memory fetch.
+- **`channels_last` (NHWC) gives negligible benefit** (~2%) because the model is attention-heavy
+  rather than conv-heavy. The first compile also takes significantly longer (102s vs 11s) as
+  inductor must regenerate all kernels for the new memory format.
+
 ## Key architecture files
 
 | File | Purpose |
