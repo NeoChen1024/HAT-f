@@ -1,0 +1,3 @@
+[submodule "BasicSR-f"]
+	path = BasicSR-f
+	url = git@github.com:NeoChen1024/BasicSR-f.git
