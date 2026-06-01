@@ -27,6 +27,13 @@ def _scandir_images(folder):
     return paths
 
 
+def _size_worker(args):
+    path, crop_size = args
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    h, w = img.shape[:2]
+    return os.path.basename(path), h, w
+
+
 def _crop_worker(args):
     path, crop_size, step, thresh_size, save_folder, compression = args
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -80,15 +87,54 @@ def _generate_meta_info(image_dir, meta_path):
 
 @click.command()
 @click.option("--input-dir", "-i", default=None, help="Directory of raw HR source images (required unless --no-crop)")
-@click.option("--output-dir", "-o", required=True, help="Directory for cropped sub-images")
+@click.option("--output-dir", "-o", default=None, help="Directory for cropped sub-images (required unless --dry-run)")
 @click.option("--crop-size", "-s", default=480, show_default=True, help="Sub-image crop size (px)")
 @click.option("--step", "-p", default=240, show_default=True, help="Sliding window step (px)")
 @click.option("--thresh-size", default=240, show_default=True, help="Discard edge patches narrower than this")
 @click.option("--workers", "-w", default=8, show_default=True, help="Parallel crop threads")
 @click.option("--compression", default=3, show_default=True, help="PNG compression level (0-9)")
 @click.option("--no-crop", is_flag=True, help="Skip cropping; only generate meta_info for existing images")
+@click.option("--dry-run", is_flag=True, help="Only scan and report image sizes; no cropping or meta_info")
 @click.option("--meta-file", "-m", default=None, help="Meta info output path (default: <output-dir>/meta_info.txt)")
-def main(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file):
+def main(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, dry_run, meta_file):
+    if not dry_run and not output_dir:
+        raise click.UsageError("--output-dir is required (unless --dry-run)")
+
+    if dry_run:
+        paths = _scandir_images(input_dir)
+        if not paths:
+            print(f"No images found in {input_dir}")
+            return
+
+        tasks = [(p, crop_size) for p in paths]
+
+        small = []
+        total = 0
+        sz_dist = {}
+        with Pool(workers) as pool:
+            for name, h, w in tqdm(
+                pool.imap_unordered(_size_worker, tasks),
+                total=len(tasks), desc="Scanning", unit="img"
+            ):
+                if h < crop_size or w < crop_size:
+                    small.append((name, h, w))
+                else:
+                    total += 1
+                key = f"{h // 100 * 100}-{h // 100 * 100 + 99}"
+                sz_dist[key] = sz_dist.get(key, 0) + 1
+
+        print(f"\nTotal: {len(tasks)} images")
+        print(f"Skipped (<{crop_size}px): {len(small)}")
+        print(f"Usable (>= {crop_size}px): {total}")
+        print(f"\nSize distribution (height):")
+        for k in sorted(sz_dist.keys()):
+            print(f"  {k:>9}px: {sz_dist[k]:>6}")
+
+        if small:
+            print(f"\nImages smaller than {crop_size}px:")
+            for name, h, w in sorted(small, key=lambda x: min(x[1], x[2])):
+                print(f"  {name:40s} ({h}x{w})")
+        return
     if meta_file is None:
         meta_file = os.path.join(output_dir, "meta_info.txt")
 
