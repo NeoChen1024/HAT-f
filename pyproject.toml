@@ -26,6 +26,7 @@ dependencies = [
     "einops",
     "torch>=2.0",
     "basicsr",
+    "click",
 ]
 
 [project.urls]

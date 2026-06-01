@@ -201,7 +201,7 @@ def _validate_multiple_of_16(ctx, param, value):
 @click.option('--model-variant', type=click.Choice(['HAT', 'HAT-S', 'HAT-L']),
               default='HAT', show_default=True, help='Model architecture variant')
 @click.option('--precision', type=click.Choice(['fp32', 'fp16', 'bf16']),
-              default='fp16', show_default=True, help='Inference precision')
+              default='bf16', show_default=True, help='Inference precision (fp16 may produce NaN with HAT)')
 def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
          use_compile, workers, model_variant, precision):
     if not torch.cuda.is_available():
@@ -209,6 +209,10 @@ def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
         sys.exit(1)
 
     amp_dtype = {'fp32': None, 'fp16': torch.float16, 'bf16': torch.bfloat16}[precision]
+
+    if precision == 'fp16':
+        print("WARNING: fp16 may produce NaN output (HAT's intermediate values exceed FP16 range).\n"
+              "         Consider using bf16 or fp32 instead.", flush=True)
 
     torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision('high')
