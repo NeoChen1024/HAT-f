@@ -120,15 +120,15 @@ def main(input_dir, output_dir, crop_size, step, thresh_size, workers, compressi
                     small.append((name, h, w))
                 else:
                     total += 1
-                key = f"{h // 100 * 100}-{h // 100 * 100 + 99}"
-                sz_dist[key] = sz_dist.get(key, 0) + 1
+                bucket = h // 100 * 100
+                sz_dist[bucket] = sz_dist.get(bucket, 0) + 1
 
         print(f"\nTotal: {len(tasks)} images")
         print(f"Skipped (<{crop_size}px): {len(small)}")
         print(f"Usable (>= {crop_size}px): {total}")
         print(f"\nSize distribution (height):")
-        for k in sorted(sz_dist.keys()):
-            print(f"  {k:>9}px: {sz_dist[k]:>6}")
+        for lo in sorted(sz_dist):
+            print(f"  {lo:>5}-{lo+99:<5}px: {sz_dist[lo]:>6}")
 
         if small:
             print(f"\nImages smaller than {crop_size}px:")
