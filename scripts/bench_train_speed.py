@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark HAT SRx4 training step speed with torch.compile.
+"""Benchmark HAT SRx4 training step speed with torch.compile and gradient accumulation.
 
-Config: HAT base (embed_dim=180, window_size=16, depths=6x6, gt_size=256, batch=4).
+Config: HAT base (embed_dim=180, window_size=16, depths=6x6, gt_size=256).
 Measures full training step: forward → loss → backward → optimizer.step → EMA update.
-Tests: AMP + torch.compile, activation checkpointing, channels_last memory format.
+Tests: AMP + torch.compile, NCHW, no checkpoint, varying accum_steps.
 """
 import sys
 import time
@@ -18,19 +18,18 @@ from hat.archs.hat_arch import HAT
 WARMUP = 10
 TIMING = 50
 GT_SIZE = 256
-BATCH = 8
 SCALE = 4
 LQ_SIZE = GT_SIZE // SCALE  # 64
 
 
-def build_model(use_checkpoint):
+def build_model():
     return HAT(
         img_size=64, patch_size=1, in_chans=3, embed_dim=180,
         depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
         window_size=16, compress_ratio=3, squeeze_factor=30,
         conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2,
         upscale=4, upsampler='pixelshuffle', resi_connection='1conv',
-        img_range=1.0, use_checkpoint=use_checkpoint,
+        img_range=1.0, use_checkpoint=False,
     )
 
 
@@ -49,13 +48,12 @@ def update_ema(net_g, net_ema, decay=0.999):
         ep.data.mul_(decay).add_(gp.data, alpha=1 - decay)
 
 
-def bench(use_checkpoint, use_channels_last):
-    ckpt_label = "ckpt" if use_checkpoint else "no_ckpt"
-    fmt_label = "NHWC" if use_channels_last else "NCHW"
-    header = f"  compile  AMP  {ckpt_label:>7s}  {fmt_label}"
+def bench(batch_size, accum_steps):
+    effective_batch = batch_size * accum_steps
+    header = f"  batch={batch_size}  accum={accum_steps}  eff_batch={effective_batch}"
 
     torch.manual_seed(42)
-    model = build_model(use_checkpoint).cuda()
+    model = build_model().cuda()
     net_ema = build_ema(model).cuda()
     criterion = nn.L1Loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, betas=(0.9, 0.99))
@@ -64,26 +62,24 @@ def bench(use_checkpoint, use_channels_last):
     model = torch.compile(model, dynamic=False)
 
     torch.manual_seed(1)
-    lq = torch.randn(BATCH, 3, LQ_SIZE, LQ_SIZE, device='cuda')
-    gt = torch.randn(BATCH, 3, GT_SIZE, GT_SIZE, device='cuda')
-    if use_channels_last:
-        lq = lq.to(memory_format=torch.channels_last)
-        gt = gt.to(memory_format=torch.channels_last)
+    lq = torch.randn(batch_size, 3, LQ_SIZE, LQ_SIZE, device='cuda')
+    gt = torch.randn(batch_size, 3, GT_SIZE, GT_SIZE, device='cuda')
 
     def step():
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast('cuda'):
-            output = model(lq)
-            loss = criterion(output, gt)
-        scaler.scale(loss).backward()
+        for _ in range(accum_steps):
+            with torch.autocast('cuda'):
+                output = model(lq)
+                loss = criterion(output, gt) / accum_steps
+            scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         update_ema(model, net_ema)
 
-    # warmup (first step triggers compilation)
+    # warmup
     for i in range(1, WARMUP + 1):
         if i == 1:
-            print(f"{header}  compiling...", flush=True)
+            print(f"{header}\n    compiling...", flush=True)
 
         torch.cuda.synchronize()
         t = time.perf_counter()
@@ -110,14 +106,15 @@ def bench(use_checkpoint, use_channels_last):
     min_ms = min(times)
     max_ms = max(times)
     mem_mb = torch.cuda.max_memory_allocated() / 1024**2
+    img_per_sec = effective_batch / (avg_ms / 1000)
 
     torch.cuda.reset_peak_memory_stats()
     del model, net_ema, optimizer, scaler, lq, gt
     torch.cuda.empty_cache()
 
-    print(f"    {'bench':>28s}  avg: {avg_ms:7.0f} ms | min: {min_ms:7.0f} ms | max: {max_ms:7.0f} ms | peak: {mem_mb:6.0f} MB", flush=True)
+    print(f"    {'bench':>28s}  avg: {avg_ms:7.0f} ms | min: {min_ms:7.0f} ms | max: {max_ms:7.0f} ms | peak: {mem_mb:6.0f} MB | {img_per_sec:6.0f} img/s", flush=True)
     print(flush=True)
-    return avg_ms
+    return avg_ms, img_per_sec, mem_mb
 
 
 def main():
@@ -130,28 +127,30 @@ def main():
     device_name = torch.cuda.get_device_name(0)
     print(f"GPU: {device_name}", flush=True)
     print(f"Config: HAT SRx4, embed_dim=180, window_size=16, depths=6x6, heads=6", flush=True)
-    print(f"        gt_size={GT_SIZE}, batch={BATCH}, L1Loss, Adam+EMA, AMP, torch.compile", flush=True)
+    print(f"        gt_size={GT_SIZE}, AMP, torch.compile, NCHW, no checkpoint", flush=True)
     print(f"        warmup={WARMUP}, timing={TIMING} iters each", flush=True)
     print(flush=True)
 
+    configs = [
+        (4, 1),
+        (6, 1),
+        (6, 8),
+    ]
+
     results = {}
-    for use_checkpoint in [False, True]:
-        for use_channels_last in [False, True]:
-            key = ('ckpt' if use_checkpoint else 'no_ckpt',
-                   'NHWC' if use_channels_last else 'NCHW')
-            results[key] = bench(use_checkpoint, use_channels_last)
+    for batch_size, accum_steps in configs:
+        key = (batch_size, accum_steps)
+        results[key] = bench(batch_size, accum_steps)
 
     # summary
-    print(f"{'='*72}", flush=True)
-    print("Summary (avg ms/step, lower is better) — all AMP + torch.compile:", flush=True)
+    print(f"{'='*80}", flush=True)
+    print("Summary (lower ms = faster step, higher img/s = more throughput):", flush=True)
     print(flush=True)
-    print(f"  {'':<15} {'NCHW':>12} {'NHWC':>12}", flush=True)
-    print(f"  {'no checkpoint':<15} {results[('no_ckpt','NCHW')]:12.0f} {results[('no_ckpt','NHWC')]:12.0f}", flush=True)
-    print(f"  {'checkpoint':<15} {results[('ckpt','NCHW')]:12.0f} {results[('ckpt','NHWC')]:12.0f}", flush=True)
-    print(flush=True)
-
-    best_key = min(results, key=results.get)
-    print(f"  Best: {best_key[0]} + {best_key[1]}: {results[best_key]:.0f} ms/step", flush=True)
+    print(f"  {'batch':>5} {'accum':>5} {'eff batch':>9} {'ms/step':>10} {'img/s':>10} {'VRAM':>8}", flush=True)
+    print(f"  {'-'*5} {'-'*5} {'-'*9} {'-'*10} {'-'*10} {'-'*8}", flush=True)
+    for batch_size, accum_steps in configs:
+        ms, ips, mem = results[(batch_size, accum_steps)]
+        print(f"  {batch_size:5d} {accum_steps:5d} {batch_size*accum_steps:9d} {ms:10.0f} {ips:10.1f} {mem:7.0f} MB", flush=True)
 
 
 if __name__ == '__main__':
