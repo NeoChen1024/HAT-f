@@ -18,6 +18,12 @@ class HATModel(SRModel):
             if hasattr(opt, 'train'):
                 opt.train()
         super().optimize_parameters(current_iter, **kwargs)
+        if kwargs.get('step', True):
+            grad_norm = 0.0
+            for p in self.net_g.parameters():
+                if p.grad is not None:
+                    grad_norm += p.grad.data.norm(2).item() ** 2
+            self.log_dict['grad_norm'] = grad_norm ** 0.5
 
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         for opt in self.optimizers:
