@@ -34,12 +34,15 @@ def _crop_worker(args):
 
     h, w = img.shape[0:2]
 
+    if h < crop_size or w < crop_size:
+        return base, -1, h, w  # skipped: too small
+
     xs = list(range(0, h - crop_size + 1, step))
-    if h - (xs[-1] + crop_size) > thresh_size:
+    if xs and h - (xs[-1] + crop_size) > thresh_size:
         xs.append(h - crop_size)
 
     ys = list(range(0, w - crop_size + 1, step))
-    if w - (ys[-1] + crop_size) > thresh_size:
+    if ys and w - (ys[-1] + crop_size) > thresh_size:
         ys.append(w - crop_size)
 
     total = len(xs) * len(ys)
@@ -108,6 +111,7 @@ def main(input_dir, output_dir, crop_size, step, thresh_size, workers, compressi
         ]
 
         total_patches = 0
+        skipped = []
         with Pool(workers) as pool:
             results = list(
                 tqdm(
@@ -117,8 +121,18 @@ def main(input_dir, output_dir, crop_size, step, thresh_size, workers, compressi
                     unit="img",
                 )
             )
-            for _, n, _, _ in results:
-                total_patches += n
+            for name, n, h, w in results:
+                if n < 0:
+                    skipped.append((name, h, w))
+                else:
+                    total_patches += n
+
+        if skipped:
+            print(f"\nWARNING: {len(skipped)} images skipped (smaller than crop_size={crop_size}):")
+            for name, h, w in skipped[:10]:
+                print(f"  {name}  ({h}x{w})")
+            if len(skipped) > 10:
+                print(f"  ... and {len(skipped) - 10} more")
 
         print(f"\nDone. {total_patches} patches saved to {output_dir}\n")
     else:
