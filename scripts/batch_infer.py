@@ -101,19 +101,67 @@ def extract_state_dict(state, param_key=None):
     return {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
 
 
-def load_model(model_path, use_compile, tile_size, tile_pad, variant="HAT"):
-    model = build_model(variant).cuda()
-    state = torch.load(model_path, map_location="cuda", weights_only=True)
+def _resolve_device(device_str):
+    """Resolve device string to torch.device and a backend tag."""
+    if device_str == "cpu":
+        return torch.device("cpu"), "cpu"
+
+    has_cuda = torch.cuda.is_available()
+    has_xpu = hasattr(torch, "xpu") and torch.xpu.is_available()
+
+    if device_str == "cuda":
+        if not has_cuda:
+            print("ERROR: CUDA not available", file=sys.stderr)
+            sys.exit(1)
+        return torch.device("cuda"), "cuda"
+
+    if device_str == "xpu":
+        if not has_xpu:
+            print("ERROR: XPU not available (install intel-extension-for-pytorch)", file=sys.stderr)
+            sys.exit(1)
+        return torch.device("xpu"), "xpu"
+
+    # "auto": prefer CUDA, then XPU, then CPU
+    if has_cuda:
+        return torch.device("cuda"), "cuda"
+    if has_xpu:
+        return torch.device("xpu"), "xpu"
+    return torch.device("cpu"), "cpu"
+
+
+def _get_device_name(device):
+    if device.type == "cuda":
+        return torch.cuda.get_device_name(device.index or 0)
+    if device.type == "xpu":
+        return torch.xpu.get_device_name(device.index or 0)
+    return "CPU"
+
+
+def _sync_device(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "xpu":
+        torch.xpu.synchronize()
+
+
+def _set_device_optimizations(device):
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+
+
+def load_model(model_path, use_compile, tile_size, tile_pad, device, variant="HAT"):
+    model = build_model(variant).to(device)
+    state = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(extract_state_dict(state), strict=True)
     model.eval()
     if use_compile:
         model = torch.compile(model, dynamic=False)
-    # dry run with the actual tile size to trigger compilation
     tile_full = tile_size + 2 * tile_pad
-    dry_tile = torch.randn(1, 3, tile_full, tile_full, device="cuda")
+    dry_tile = torch.randn(1, 3, tile_full, tile_full, device=device)
     with torch.inference_mode():
         _ = model(dry_tile)
-    torch.cuda.synchronize()
+    _sync_device(device)
     return model
 
 
@@ -135,9 +183,9 @@ def pad_to_window(tensor):
     return tensor
 
 
-def tile_infer(model, lq, tile_size, tile_pad):
+def tile_infer(model, lq, tile_size, tile_pad, device):
     """Super-resolve one image via overlapping tile processing."""
-    lq = lq.cuda()
+    lq = lq.to(device)
     _, _, h, w = lq.shape
 
     # Pad to window multiple
@@ -161,7 +209,7 @@ def tile_infer(model, lq, tile_size, tile_pad):
 
     out_h = h * SCALE
     out_w = w * SCALE
-    output = torch.zeros(1, 3, out_h + (pad_top + pad_bottom) * SCALE, out_w + (pad_left + pad_right) * SCALE, device="cuda")
+    output = torch.zeros(1, 3, out_h + (pad_top + pad_bottom) * SCALE, out_w + (pad_left + pad_right) * SCALE, device=device)
 
     for ty in range(tiles_y):
         for tx in range(tiles_x):
@@ -261,23 +309,31 @@ def _validate_workers(ctx, param, value):
     show_default=True,
     help="Model architecture variant",
 )
-def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality, use_compile, workers, model_variant):
-    if not torch.cuda.is_available():
-        print("ERROR: CUDA not available")
-        sys.exit(1)
+@click.option(
+    "--device",
+    "-d",
+    type=click.Choice(["auto", "cuda", "xpu", "cpu"]),
+    default="auto",
+    show_default=True,
+    help="Compute device (auto: CUDA > XPU > CPU)",
+)
+def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality, use_compile, workers, model_variant, device):
+    torch_device, backend = _resolve_device(device)
+    if torch_device.type == "cpu" and device != "cpu":
+        print("WARNING: No GPU/XPU detected, falling back to CPU", file=sys.stderr)
 
-    torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("high")
+    _set_device_optimizations(torch_device)
+
     os.makedirs(output_dir, exist_ok=True)
 
+    device_name = _get_device_name(torch_device)
     print(f"Model:  {model_path}  ({model_variant})", flush=True)
-    print(f"GPU:    {torch.cuda.get_device_name(0)}", flush=True)
+    print(f"Device: {device_name}  [{backend}]", flush=True)
     print(f"Tile:   {tile_size} + pad {tile_pad}  |  compile: {use_compile}", flush=True)
     print(f"Output: {fmt.upper()}", flush=True)
 
-    # load model (first forward triggers compile)
     print("Loading model...", flush=True)
-    model = load_model(model_path, use_compile, tile_size, tile_pad, variant=model_variant)
+    model = load_model(model_path, use_compile, tile_size, tile_pad, torch_device, variant=model_variant)
     print("Ready.\n")
 
     images = scan_images(input_dir)
@@ -296,7 +352,7 @@ def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality, u
             lq = load_image(img_path)
             _, _, h, w = lq.shape
 
-            sr = tile_infer(model, lq, tile_size, tile_pad)
+            sr = tile_infer(model, lq, tile_size, tile_pad, torch_device)
 
             arr = tensor_to_numpy(sr)
             futures.append(pool.submit(save_image, arr, out_path, fmt, quality))
