@@ -150,13 +150,21 @@ def scan_images(input_dir):
     return paths
 
 
+def _validate_multiple_of_16(ctx, param, value):
+    if value % 16 != 0:
+        raise click.BadParameter(f'must be a multiple of 16 (window_size), got {value}')
+    return value
+
+
 @click.command()
 @click.option('--input-dir', '-i', required=True, help='Directory of input images')
 @click.option('--output-dir', '-o', required=True, help='Directory for output images')
 @click.option('--model-path', '-m', default='experiments/pretrained_models/Real_HAT_GAN_SRx4.pth',
               show_default=True, help='Path to pretrained model')
-@click.option('--tile-size', default=512, show_default=True, help='Tile size in LR pixels')
-@click.option('--tile-pad', default=32, show_default=True, help='Overlap between tiles')
+@click.option('--tile-size', default=512, show_default=True, help='Tile size in LR pixels',
+              callback=_validate_multiple_of_16)
+@click.option('--tile-pad', default=32, show_default=True, help='Overlap between tiles',
+              callback=_validate_multiple_of_16)
 @click.option('--format', '-f', 'fmt', type=click.Choice(['png', 'webp']),
               default='png', show_default=True, help='Output format')
 @click.option('--quality', '-q', default=95, show_default=True, help='WebP quality (1-100)')
