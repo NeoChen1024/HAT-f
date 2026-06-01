@@ -173,27 +173,24 @@ class WindowAttention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
+        attn = (q @ k.transpose(-2, -1))
 
-        # Q@K^T can overflow FP16; run attention core in FP32
-        with torch.amp.autocast('cuda', enabled=False):
-            attn = (q.float() @ k.float().transpose(-2, -1))
+        relative_position_bias = self.relative_position_bias_table[rpi.view(-1)].view(
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        attn = attn + relative_position_bias.unsqueeze(0)
 
-            relative_position_bias = self.relative_position_bias_table[rpi.view(-1)].view(
-                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-            attn = attn + relative_position_bias.unsqueeze(0)
-
-            if mask is not None:
-                nw = mask.shape[0]
-                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
-                attn = attn.view(-1, self.num_heads, n, n)
+        if mask is not None:
+            nw = mask.shape[0]
+            attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, n, n)
+            attn = self.softmax(attn)
+        else:
             attn = self.softmax(attn)
 
-            attn = self.attn_drop(attn)
+        attn = self.attn_drop(attn)
 
-            x = (attn @ v.float()).transpose(1, 2).reshape(b_, n, c)
-            x = x.type_as(v)
-
+        x = (attn @ v).transpose(1, 2).reshape(b_, n, c)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -420,19 +417,15 @@ class OCAB(nn.Module):
         v = v_windows.reshape(b_, n, self.num_heads, d).permute(0, 2, 1, 3) # nw*b, nH, n, d
 
         q = q * self.scale
+        attn = (q @ k.transpose(-2, -1))
 
-        # Q@K^T can overflow FP16; run attention core in FP32
-        with torch.amp.autocast('cuda', enabled=False):
-            attn = (q.float() @ k.float().transpose(-2, -1))
+        relative_position_bias = self.relative_position_bias_table[rpi.view(-1)].view(
+            self.window_size * self.window_size, self.overlap_win_size * self.overlap_win_size, -1)  # ws*ws, wse*wse, nH
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, ws*ws, wse*wse
+        attn = attn + relative_position_bias.unsqueeze(0)
 
-            relative_position_bias = self.relative_position_bias_table[rpi.view(-1)].view(
-                self.window_size * self.window_size, self.overlap_win_size * self.overlap_win_size, -1)  # ws*ws, wse*wse, nH
-            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, ws*ws, wse*wse
-            attn = attn + relative_position_bias.unsqueeze(0)
-
-            attn = self.softmax(attn)
-            attn_windows = (attn @ v.float()).transpose(1, 2).reshape(b_, nq, self.dim)
-            attn_windows = attn_windows.type_as(v)
+        attn = self.softmax(attn)
+        attn_windows = (attn @ v).transpose(1, 2).reshape(b_, nq, self.dim)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, self.dim)

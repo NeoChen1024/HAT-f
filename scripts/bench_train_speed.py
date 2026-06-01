@@ -3,6 +3,7 @@
 
 Supports single-GPU, multi-GPU (DDP), and gradient accumulation.
 Full training step: forward → loss → backward → optimizer.step → EMA update.
+Pure FP32 — no AMP (HAT is attention-heavy, AMP speedup < 10%).
 """
 import sys
 import os
@@ -60,7 +61,7 @@ def cleanup_ddp():
 
 
 def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, timing,
-                 use_checkpoint, precision, master_port, is_master):
+                 use_checkpoint, master_port, is_master):
     if world_size > 1:
         setup_ddp(rank, world_size, master_port)
 
@@ -72,10 +73,6 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
     net_ema = build_ema(model).cuda(rank)
     criterion = nn.L1Loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, betas=(0.9, 0.99))
-
-    use_amp = precision != 'fp32'
-    amp_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16}.get(precision)
-    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     model = torch.compile(model, dynamic=False)
 
@@ -89,18 +86,10 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
     def step():
         optimizer.zero_grad(set_to_none=True)
         for _ in range(accum_steps):
-            with torch.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
-                output = model(lq)
-                loss = criterion(output, gt) / accum_steps
-            if use_amp:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-        if use_amp:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
+            output = model(lq)
+            loss = criterion(output, gt) / accum_steps
+            loss.backward()
+        optimizer.step()
         update_ema(model, net_ema)
 
     # warmup
@@ -162,7 +151,7 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
     if world_size > 1:
         cleanup_ddp()
 
-    del model, net_ema, optimizer, scaler, lq, gt
+    del model, net_ema, optimizer, lq, gt
     torch.cuda.empty_cache()
     return avg_ms
 
@@ -175,10 +164,8 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
 @click.option('--timing', '-t', default=50, show_default=True, help='Timing iterations')
 @click.option('--gpus', '-g', default='0', show_default=True, help='Comma-separated GPU IDs, e.g. 0,1,2,3')
 @click.option('--use-checkpoint/--no-checkpoint', default=False, help='Use activation checkpointing')
-@click.option('--precision', '-p', type=click.Choice(['fp16', 'bf16', 'fp32']),
-              default='fp16', show_default=True, help='AMP precision (fp32 = no AMP)')
 @click.option('--master-port', default=29500, show_default=True, help='DDP master port')
-def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, precision, master_port):
+def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, master_port):
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available")
         sys.exit(1)
@@ -191,13 +178,12 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
     device_name = torch.cuda.get_device_name(gpu_ids[0])
     effective_batch = batch_size * accum_steps * world_size
     ckpt = "yes" if use_checkpoint else "no"
-    amp_label = precision.upper() if precision != 'fp32' else 'FP32 (no AMP)'
 
     print(f"GPU: {device_name}", flush=True)
     print(f"GPUs: {gpu_ids} (world_size={world_size})", flush=True)
     print(f"Config: HAT SRx4, embed_dim=180, window_size=16, depths=6x6, heads=6", flush=True)
     print(f"        gt_size={gt_size}, batch={batch_size}, accum={accum_steps}, eff_batch={effective_batch}", flush=True)
-    print(f"        {amp_label}, torch.compile, NCHW, checkpoint={ckpt}", flush=True)
+    print(f"        FP32, torch.compile, NCHW, checkpoint={ckpt}", flush=True)
     print(f"        warmup={warmup}, timing={timing} iters each", flush=True)
     print(flush=True)
 
@@ -206,14 +192,14 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
         mp.spawn(
             bench_worker,
             args=(world_size, batch_size, accum_steps, gt_size, warmup, timing,
-                  use_checkpoint, precision, master_port, False),
+                  use_checkpoint, master_port, False),
             nprocs=world_size,
         )
     else:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_ids[0])
         bench_worker(
             0, 1, batch_size, accum_steps, gt_size, warmup, timing,
-            use_checkpoint, precision, master_port, True,
+            use_checkpoint, master_port, True,
         )
 
 
