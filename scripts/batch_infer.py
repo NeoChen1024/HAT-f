@@ -27,19 +27,39 @@ WINDOW_SIZE = 16
 SCALE = 4
 
 
-def build_model():
+def build_model(variant='HAT'):
+    if variant == 'HAT-S':
+        return HAT(
+            img_size=64, patch_size=1, in_chans=3, embed_dim=144,
+            depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
+            window_size=16, compress_ratio=24, squeeze_factor=24,
+            conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2,
+            upscale=SCALE, upsampler='pixelshuffle', resi_connection='1conv',
+            img_range=1.0,
+        )
+    if variant == 'HAT-L':
+        return HAT(
+            img_size=64, patch_size=1, in_chans=3, embed_dim=180,
+            depths=[6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+            num_heads=[6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+            window_size=16, compress_ratio=3, squeeze_factor=30,
+            conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2,
+            upscale=SCALE, upsampler='pixelshuffle', resi_connection='1conv',
+            img_range=1.0,
+        )
+    # HAT (default)
     return HAT(
         img_size=64, patch_size=1, in_chans=3, embed_dim=180,
         depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
-        window_size=WINDOW_SIZE, compress_ratio=3, squeeze_factor=30,
+        window_size=16, compress_ratio=3, squeeze_factor=30,
         conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2,
         upscale=SCALE, upsampler='pixelshuffle', resi_connection='1conv',
         img_range=1.0,
     )
 
 
-def load_model(model_path, use_compile):
-    model = build_model().cuda()
+def load_model(model_path, use_compile, variant='HAT'):
+    model = build_model(variant).cuda()
     state = torch.load(model_path, map_location='cuda', weights_only=True)
     key = 'params_ema' if 'params_ema' in state else 'params'
     model.load_state_dict(state[key] if key in state else state, strict=True)
@@ -170,8 +190,10 @@ def _validate_multiple_of_16(ctx, param, value):
 @click.option('--quality', '-q', default=95, show_default=True, help='WebP quality (1-100)')
 @click.option('--compile/--no-compile', 'use_compile', default=True, help='Use torch.compile')
 @click.option('--workers', '-w', default=4, show_default=True, help='Encoding threads')
+@click.option('--model-variant', type=click.Choice(['HAT', 'HAT-S', 'HAT-L']),
+              default='HAT', show_default=True, help='Model architecture variant')
 def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
-         use_compile, workers):
+         use_compile, workers, model_variant):
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available")
         sys.exit(1)
@@ -180,14 +202,14 @@ def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
     torch.set_float32_matmul_precision('high')
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Model:  {model_path}", flush=True)
+    print(f"Model:  {model_path}  ({model_variant})", flush=True)
     print(f"GPU:    {torch.cuda.get_device_name(0)}", flush=True)
     print(f"Tile:   {tile_size} + pad {tile_pad}  |  compile: {use_compile}", flush=True)
     print(f"Output: {fmt.upper()}", flush=True)
 
     # load model (first forward triggers compile)
     print("Loading model...", flush=True)
-    model = load_model(model_path, use_compile)
+    model = load_model(model_path, use_compile, variant=model_variant)
     dry_tile = torch.randn(1, 3, tile_size + 2 * tile_pad, tile_size + 2 * tile_pad, device='cuda')
     dry_tile = dry_tile.contiguous()
     with torch.no_grad():
