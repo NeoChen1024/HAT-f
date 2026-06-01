@@ -58,7 +58,7 @@ def build_model(variant='HAT'):
     )
 
 
-def load_model(model_path, use_compile, tile_size, tile_pad, variant='HAT', amp_dtype=None):
+def load_model(model_path, use_compile, tile_size, tile_pad, variant='HAT'):
     model = build_model(variant).cuda()
     state = torch.load(model_path, map_location='cuda', weights_only=True)
     key = 'params_ema' if 'params_ema' in state else 'params'
@@ -69,9 +69,8 @@ def load_model(model_path, use_compile, tile_size, tile_pad, variant='HAT', amp_
     # dry run with the actual tile size to trigger compilation
     tile_full = tile_size + 2 * tile_pad
     dry_tile = torch.randn(1, 3, tile_full, tile_full, device='cuda')
-    with torch.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
-        with torch.no_grad():
-            _ = model(dry_tile)
+    with torch.no_grad():
+        _ = model(dry_tile)
     torch.cuda.synchronize()
     return model
 
@@ -93,7 +92,7 @@ def pad_to_window(tensor):
     return tensor
 
 
-def tile_infer(model, lq, tile_size, tile_pad, amp_dtype=None):
+def tile_infer(model, lq, tile_size, tile_pad):
     """Super-resolve one image via overlapping tile processing."""
     lq = lq.cuda()
     _, _, h, w = lq.shape
@@ -133,9 +132,8 @@ def tile_infer(model, lq, tile_size, tile_pad, amp_dtype=None):
 
             tile = lq[:, :, ly_s:ly_s + tile_full, lx_s:lx_s + tile_full].contiguous()
 
-            with torch.autocast('cuda', enabled=amp_dtype is not None, dtype=amp_dtype):
-                with torch.no_grad():
-                    sr_tile = model(tile)
+            with torch.no_grad():
+                sr_tile = model(tile)
 
             out_start = tile_pad * SCALE
             out_end_y = out_start + th * SCALE
@@ -200,19 +198,11 @@ def _validate_multiple_of_16(ctx, param, value):
 @click.option('--workers', '-w', default=4, show_default=True, help='Encoding threads')
 @click.option('--model-variant', type=click.Choice(['HAT', 'HAT-S', 'HAT-L']),
               default='HAT', show_default=True, help='Model architecture variant')
-@click.option('--precision', type=click.Choice(['fp32', 'fp16', 'bf16']),
-              default='bf16', show_default=True, help='Inference precision (fp16 may produce NaN with HAT)')
 def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
-         use_compile, workers, model_variant, precision):
+         use_compile, workers, model_variant):
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available")
         sys.exit(1)
-
-    amp_dtype = {'fp32': None, 'fp16': torch.float16, 'bf16': torch.bfloat16}[precision]
-
-    if precision == 'fp16':
-        print("WARNING: fp16 may produce NaN output (HAT's intermediate values exceed FP16 range).\n"
-              "         Consider using bf16 or fp32 instead.", flush=True)
 
     torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision('high')
@@ -220,13 +210,13 @@ def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
 
     print(f"Model:  {model_path}  ({model_variant})", flush=True)
     print(f"GPU:    {torch.cuda.get_device_name(0)}", flush=True)
-    print(f"Tile:   {tile_size} + pad {tile_pad}  |  compile: {use_compile}  |  {precision}", flush=True)
+    print(f"Tile:   {tile_size} + pad {tile_pad}  |  compile: {use_compile}", flush=True)
     print(f"Output: {fmt.upper()}", flush=True)
 
     # load model (first forward triggers compile)
     print("Loading model...", flush=True)
     model = load_model(model_path, use_compile, tile_size, tile_pad,
-                       variant=model_variant, amp_dtype=amp_dtype)
+                       variant=model_variant)
     print("Ready.\n")
 
     images = scan_images(input_dir)
@@ -244,7 +234,7 @@ def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality,
         lq = load_image(img_path)
         _, _, h, w = lq.shape
 
-        sr = tile_infer(model, lq, tile_size, tile_pad, amp_dtype=amp_dtype)
+        sr = tile_infer(model, lq, tile_size, tile_pad)
 
         arr = tensor_to_numpy(sr)
         f = pool.submit(save_image, arr, out_path, fmt, quality)
