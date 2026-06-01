@@ -60,7 +60,7 @@ def cleanup_ddp():
 
 
 def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, timing,
-                 use_checkpoint, channels_last, master_port, is_master):
+                 use_checkpoint, master_port, is_master):
     if world_size > 1:
         setup_ddp(rank, world_size, master_port)
 
@@ -82,9 +82,6 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
     torch.manual_seed(1 + rank)
     lq = torch.randn(batch_size, 3, lq_size, lq_size, device=rank)
     gt = torch.randn(batch_size, 3, gt_size, gt_size, device=rank)
-    if channels_last:
-        lq = lq.to(memory_format=torch.channels_last)
-        gt = gt.to(memory_format=torch.channels_last)
 
     def step():
         optimizer.zero_grad(set_to_none=True)
@@ -169,10 +166,8 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
 @click.option('--timing', '-t', default=50, show_default=True, help='Timing iterations')
 @click.option('--gpus', '-g', default='0', show_default=True, help='Comma-separated GPU IDs, e.g. 0,1,2,3')
 @click.option('--use-checkpoint/--no-checkpoint', default=False, help='Use activation checkpointing')
-@click.option('--channels-last/--no-channels-last', default=False, help='Use NHWC memory format')
 @click.option('--master-port', default=29500, show_default=True, help='DDP master port')
-def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, channels_last,
-         master_port):
+def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, master_port):
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available")
         sys.exit(1)
@@ -184,14 +179,13 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
 
     device_name = torch.cuda.get_device_name(gpu_ids[0])
     effective_batch = batch_size * accum_steps * world_size
-    fmt = "NHWC" if channels_last else "NCHW"
     ckpt = "yes" if use_checkpoint else "no"
 
     print(f"GPU: {device_name}", flush=True)
     print(f"GPUs: {gpu_ids} (world_size={world_size})", flush=True)
     print(f"Config: HAT SRx4, embed_dim=180, window_size=16, depths=6x6, heads=6", flush=True)
     print(f"        gt_size={gt_size}, batch={batch_size}, accum={accum_steps}, eff_batch={effective_batch}", flush=True)
-    print(f"        AMP, torch.compile, {fmt}, checkpoint={ckpt}", flush=True)
+    print(f"        AMP, torch.compile, NCHW, checkpoint={ckpt}", flush=True)
     print(f"        warmup={warmup}, timing={timing} iters each", flush=True)
     print(flush=True)
 
@@ -200,14 +194,14 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
         mp.spawn(
             bench_worker,
             args=(world_size, batch_size, accum_steps, gt_size, warmup, timing,
-                  use_checkpoint, channels_last, master_port, False),
+                  use_checkpoint, master_port, False),
             nprocs=world_size,
         )
     else:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_ids[0])
         bench_worker(
             0, 1, batch_size, accum_steps, gt_size, warmup, timing,
-            use_checkpoint, channels_last, master_port, True,
+            use_checkpoint, master_port, True,
         )
 
 
