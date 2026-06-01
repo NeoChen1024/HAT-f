@@ -5,6 +5,7 @@ Supports single-GPU, multi-GPU (DDP), and gradient accumulation.
 Full training step: forward → loss → backward → optimizer.step → EMA update.
 Pure FP32 — no AMP (HAT is attention-heavy, AMP speedup < 10%).
 """
+
 import sys
 import os
 import time
@@ -16,7 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-sys.path.insert(0, sys.path[0] + '/..' if sys.path[0].endswith('scripts') else '.')
+sys.path.insert(0, sys.path[0] + "/.." if sys.path[0].endswith("scripts") else ".")
 
 from hat.archs.hat_arch import HAT
 
@@ -25,12 +26,23 @@ SCALE = 4
 
 def build_model(use_checkpoint):
     return HAT(
-        img_size=64, patch_size=1, in_chans=3, embed_dim=180,
-        depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
-        window_size=16, compress_ratio=3, squeeze_factor=30,
-        conv_scale=0.01, overlap_ratio=0.5, mlp_ratio=2,
-        upscale=4, upsampler='pixelshuffle', resi_connection='1conv',
-        img_range=1.0, use_checkpoint=use_checkpoint,
+        img_size=64,
+        patch_size=1,
+        in_chans=3,
+        embed_dim=180,
+        depths=[6, 6, 6, 6, 6, 6],
+        num_heads=[6, 6, 6, 6, 6, 6],
+        window_size=16,
+        compress_ratio=3,
+        squeeze_factor=30,
+        conv_scale=0.01,
+        overlap_ratio=0.5,
+        mlp_ratio=2,
+        upscale=4,
+        upsampler="pixelshuffle",
+        resi_connection="1conv",
+        img_range=1.0,
+        use_checkpoint=use_checkpoint,
     )
 
 
@@ -50,9 +62,9 @@ def update_ema(net_g, net_ema, decay=0.999):
 
 
 def setup_ddp(rank, world_size, master_port=29500):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(master_port)
-    dist.init_process_group('nccl', rank=rank, world_size=world_size)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(master_port)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 
@@ -60,8 +72,7 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 
-def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, timing,
-                 use_checkpoint, master_port, is_master):
+def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, timing, use_checkpoint, master_port, is_master):
     if world_size > 1:
         setup_ddp(rank, world_size, master_port)
 
@@ -145,7 +156,10 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
 
     if is_master:
         img_per_sec = effective_batch / (avg_ms / 1000)
-        print(f"    {'bench':>28s}  avg: {avg_ms:7.0f} ms | min: {min_ms:7.0f} ms | max: {max_ms:7.0f} ms | peak: {mem_mb:6.0f} MB | {img_per_sec:6.0f} img/s", flush=True)
+        print(
+            f"    {'bench':>28s}  avg: {avg_ms:7.0f} ms | min: {min_ms:7.0f} ms | max: {max_ms:7.0f} ms | peak: {mem_mb:6.0f} MB | {img_per_sec:6.0f} img/s",
+            flush=True,
+        )
         print(flush=True)
 
     if world_size > 1:
@@ -157,22 +171,22 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
 
 
 @click.command()
-@click.option('--batch-size', '-b', default=6, show_default=True, help='Per-GPU batch size')
-@click.option('--accum-steps', '-a', default=8, show_default=True, help='Gradient accumulation steps')
-@click.option('--gt-size', '-s', default=256, show_default=True, help='GT crop size (LQ = GT/4)')
-@click.option('--warmup', '-w', default=10, show_default=True, help='Warmup iterations')
-@click.option('--timing', '-t', default=50, show_default=True, help='Timing iterations')
-@click.option('--gpus', '-g', default='0', show_default=True, help='Comma-separated GPU IDs, e.g. 0,1,2,3')
-@click.option('--use-checkpoint/--no-checkpoint', default=False, help='Use activation checkpointing')
-@click.option('--master-port', default=29500, show_default=True, help='DDP master port')
+@click.option("--batch-size", "-b", default=6, show_default=True, help="Per-GPU batch size")
+@click.option("--accum-steps", "-a", default=8, show_default=True, help="Gradient accumulation steps")
+@click.option("--gt-size", "-s", default=256, show_default=True, help="GT crop size (LQ = GT/4)")
+@click.option("--warmup", "-w", default=10, show_default=True, help="Warmup iterations")
+@click.option("--timing", "-t", default=50, show_default=True, help="Timing iterations")
+@click.option("--gpus", "-g", default="0", show_default=True, help="Comma-separated GPU IDs, e.g. 0,1,2,3")
+@click.option("--use-checkpoint/--no-checkpoint", default=False, help="Use activation checkpointing")
+@click.option("--master-port", default=29500, show_default=True, help="DDP master port")
 def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, master_port):
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available")
         sys.exit(1)
 
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision("high")
 
-    gpu_ids = [int(x.strip()) for x in gpus.split(',')]
+    gpu_ids = [int(x.strip()) for x in gpus.split(",")]
     world_size = len(gpu_ids)
 
     device_name = torch.cuda.get_device_name(gpu_ids[0])
@@ -188,20 +202,27 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
     print(flush=True)
 
     if world_size > 1:
-        os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(g) for g in gpu_ids)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
         mp.spawn(
             bench_worker,
-            args=(world_size, batch_size, accum_steps, gt_size, warmup, timing,
-                  use_checkpoint, master_port, False),
+            args=(world_size, batch_size, accum_steps, gt_size, warmup, timing, use_checkpoint, master_port, False),
             nprocs=world_size,
         )
     else:
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_ids[0])
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[0])
         bench_worker(
-            0, 1, batch_size, accum_steps, gt_size, warmup, timing,
-            use_checkpoint, master_port, True,
+            0,
+            1,
+            batch_size,
+            accum_steps,
+            gt_size,
+            warmup,
+            timing,
+            use_checkpoint,
+            master_port,
+            True,
         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

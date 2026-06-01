@@ -45,11 +45,8 @@ hat = ["data/meta_info/*.txt"]
 ignore = ["W503", "W504"]
 max-line-length = 120
 
-[tool.yapf]
-based_on_style = "pep8"
-column_limit = 120
-blank_line_before_nested_class_or_def = true
-split_before_expression_after_opening_paren = true
+[tool.black]
+line-length = 132
 
 [tool.isort]
 line_length = 120
