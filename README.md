@@ -97,6 +97,9 @@ Full benchmarks: `python3 scripts/bench_train_speed.py -b 6 -a 8 -w 2 -t 15`
 - `torch.meshgrid` uses `indexing='ij'` explicitly.
 - `rgb2ycbcr` import updated from `matlab_functions` → `color_util` (BasicSR 1.3→1.4).
 - Setup uses legacy `setup.py` + `pyproject.toml` shim.
+- **PyTorch 2.12 `torch.compile` GPU hang**: inductor backend may cause GPU hang
+  during batch inference (especially with many tiles). If this occurs, use
+  `--compile eager` or `--compile aot_eager` in `scripts/batch_infer.py`.
 
 ## Citations
 

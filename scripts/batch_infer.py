@@ -150,12 +150,16 @@ def _set_device_optimizations(device):
     torch.set_float32_matmul_precision("high")
 
 
-def load_model(model_path, use_compile, tile_size, tile_pad, device, variant="HAT"):
+def load_model(model_path, compile_mode, tile_size, tile_pad, device, variant="HAT"):
     model = build_model(variant).to(device)
     state = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(extract_state_dict(state), strict=True)
     model.eval()
-    if use_compile:
+    if compile_mode == "aot_eager":
+        model = torch.compile(model, dynamic=False, backend="aot_eager")
+    elif compile_mode in ("reduce-overhead", "max-autotune"):
+        model = torch.compile(model, dynamic=False, mode=compile_mode)
+    elif compile_mode != "eager":
         model = torch.compile(model, dynamic=False)
     tile_full = tile_size + 2 * tile_pad
     dry_tile = torch.randn(1, 3, tile_full, tile_full, device=device)
@@ -300,7 +304,13 @@ def _validate_workers(ctx, param, value):
 @click.option("--tile-pad", default=32, show_default=True, help="Overlap between tiles", callback=_validate_multiple_of_16)
 @click.option("--format", "-f", "fmt", type=click.Choice(["png", "webp"]), default="png", show_default=True, help="Output format")
 @click.option("--quality", "-q", default=95, show_default=True, help="WebP quality (1-100)", callback=_validate_quality)
-@click.option("--compile/--no-compile", "use_compile", default=True, help="Use torch.compile")
+@click.option(
+    "--compile", "compile_mode",
+    type=click.Choice(["eager", "aot_eager", "default", "reduce-overhead", "max-autotune"]),
+    default="default",
+    show_default=True,
+    help="torch.compile backend (eager = no compile)",
+)
 @click.option("--workers", "-w", default=4, show_default=True, help="Encoding threads", callback=_validate_workers)
 @click.option(
     "--model-variant",
@@ -317,7 +327,7 @@ def _validate_workers(ctx, param, value):
     show_default=True,
     help="Compute device (auto: CUDA > XPU > CPU)",
 )
-def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality, use_compile, workers, model_variant, device):
+def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality, compile_mode, workers, model_variant, device):
     torch_device, backend = _resolve_device(device)
     if torch_device.type == "cpu" and device != "cpu":
         print("WARNING: No GPU/XPU detected, falling back to CPU", file=sys.stderr)
@@ -329,11 +339,11 @@ def main(input_dir, output_dir, model_path, tile_size, tile_pad, fmt, quality, u
     device_name = _get_device_name(torch_device)
     print(f"Model:  {model_path}  ({model_variant})", flush=True)
     print(f"Device: {device_name}  [{backend}]", flush=True)
-    print(f"Tile:   {tile_size} + pad {tile_pad}  |  compile: {use_compile}", flush=True)
+    print(f"Tile:   {tile_size} + pad {tile_pad}  |  compile: {compile_mode}", flush=True)
     print(f"Output: {fmt.upper()}", flush=True)
 
     print("Loading model...", flush=True)
-    model = load_model(model_path, use_compile, tile_size, tile_pad, torch_device, variant=model_variant)
+    model = load_model(model_path, compile_mode, tile_size, tile_pad, torch_device, variant=model_variant)
     print("Ready.\n")
 
     images = scan_images(input_dir)
