@@ -13,17 +13,31 @@ from os import path as osp
 @MODEL_REGISTRY.register()
 class HATModel(SRModel):
 
-    def optimize_parameters(self, current_iter):
+    def optimize_parameters(self, current_iter, **kwargs):
         for opt in self.optimizers:
             if hasattr(opt, 'train'):
                 opt.train()
-        super().optimize_parameters(current_iter)
+        super().optimize_parameters(current_iter, **kwargs)
 
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         for opt in self.optimizers:
             if hasattr(opt, 'eval'):
                 opt.eval()
         super().nondist_validation(dataloader, current_iter, tb_logger, save_img)
+
+    def get_current_learning_rate(self):
+        g = self.optimizers[0].param_groups[0]
+        base_lr = g['lr']
+        return [base_lr]
+
+    def get_current_log(self):
+        log = dict(super().get_current_log()) if hasattr(self, 'log_dict') and self.log_dict else {}
+        g = self.optimizers[0].param_groups[0]
+        if 'd' in g:
+            log['prodigy_d'] = g['d']
+        if 'effective_lr' in g and g['effective_lr'] != 1.0:
+            log['eff_lr'] = g['effective_lr']
+        return log
 
     def pre_process(self):
         # pad to multiplication of window_size
