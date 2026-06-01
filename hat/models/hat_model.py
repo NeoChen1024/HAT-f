@@ -13,6 +13,18 @@ from os import path as osp
 @MODEL_REGISTRY.register()
 class HATModel(SRModel):
 
+    def optimize_parameters(self, current_iter):
+        for opt in self.optimizers:
+            if hasattr(opt, 'train'):
+                opt.train()
+        super().optimize_parameters(current_iter)
+
+    def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
+        for opt in self.optimizers:
+            if hasattr(opt, 'eval'):
+                opt.eval()
+        super().nondist_validation(dataloader, current_iter, tb_logger, save_img)
+
     def pre_process(self):
         # pad to multiplication of window_size
         window_size = self.opt['network_g']['window_size']

@@ -18,7 +18,7 @@ from hat.archs.hat_arch import HAT
 WARMUP = 10
 TIMING = 50
 GT_SIZE = 256
-BATCH = 4
+BATCH = 8
 SCALE = 4
 LQ_SIZE = GT_SIZE // SCALE  # 64
 
