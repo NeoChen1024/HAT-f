@@ -19,22 +19,16 @@ class HATModel(SRModel):
                 opt.train()
         super().optimize_parameters(current_iter, **kwargs)
         if kwargs.get('step', True):
-            grad_norm = 0.0
+            grad_norm_sq, grad_max, weight_norm_sq = 0.0, 0.0, 0.0
             for p in self.net_g.parameters():
                 if p.grad is not None:
-                    grad_norm += p.grad.data.norm(2).item() ** 2
-            self.log_dict['grad_norm'] = grad_norm ** 0.5
-
-    def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
-        for opt in self.optimizers:
-            if hasattr(opt, 'eval'):
-                opt.eval()
-        super().nondist_validation(dataloader, current_iter, tb_logger, save_img)
-
-    def get_current_learning_rate(self):
-        g = self.optimizers[0].param_groups[0]
-        base_lr = g['lr']
-        return [base_lr]
+                    g = p.grad.data
+                    grad_norm_sq += g.float().norm(2).item() ** 2
+                    grad_max = max(grad_max, g.float().abs().max().item())
+                weight_norm_sq += p.data.float().norm(2).item() ** 2
+            self.log_dict['grad_norm'] = grad_norm_sq ** 0.5
+            self.log_dict['grad_max'] = grad_max
+            self.log_dict['weight_norm'] = weight_norm_sq ** 0.5
 
     def get_current_log(self):
         log = dict(super().get_current_log()) if hasattr(self, 'log_dict') and self.log_dict else {}
@@ -43,6 +37,11 @@ class HATModel(SRModel):
             log['prodigy_d'] = g['d']
         if 'effective_lr' in g and g['effective_lr'] != 1.0:
             log['eff_lr'] = g['effective_lr']
+        if 'd' in g:
+            log['lr_true'] = g['d'] * g['lr'] * g.get('effective_lr', 1.0)
+        # VRAM peak in GB, only when CUDA is available
+        if torch.cuda.is_available():
+            log['vram_gb'] = torch.cuda.max_memory_allocated() / 1024**3
         return log
 
     def pre_process(self):
