@@ -5,6 +5,12 @@ scale: 4
 num_gpu: auto
 manual_seed: 0
 
+# torch.compile (uncomment to enable, ~1.8x speedup)
+# compile:
+#   mode: default           # default | reduce-overhead | max-autotune
+#   backend: inductor       # inductor | aot_eager | eager
+#   dynamic: false          # must be false for HAT (static shapes)
+
 # dataset and data loader settings
 datasets:
   train:
