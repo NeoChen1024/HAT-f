@@ -8,11 +8,16 @@ Three modes:
 """
 
 import os
+import re
 import click
 import cv2
 import numpy as np
 from multiprocessing import Pool
 from tqdm import tqdm
+
+
+def _sanitize_name(name):
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
 
 
 def _modcrop(img, scale):
@@ -39,7 +44,7 @@ def _size_worker(args):
 def _crop_worker(args):
     path, crop_size, step, thresh_size, save_folder, compression = args
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    base = os.path.splitext(os.path.basename(path))[0]
+    base = _sanitize_name(os.path.splitext(os.path.basename(path))[0])
 
     h, w = img.shape[0:2]
 
@@ -154,7 +159,7 @@ def _scan_mode(input_dir, crop_size, workers):
 def _paired_worker(args):
     path, scale, gt_dir, lq_dir, compression = args
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    base = os.path.splitext(os.path.basename(path))[0]
+    base = _sanitize_name(os.path.splitext(os.path.basename(path))[0])
 
     img = _modcrop(img, scale)
     h, w = img.shape[:2]
