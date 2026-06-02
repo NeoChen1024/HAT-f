@@ -552,6 +552,11 @@ class AttenBlocks(nn.Module):
             self.downsample = None
 
     def forward(self, x, x_size, params):
+        if self.use_checkpoint:
+            return checkpoint.checkpoint(self._forward_impl, x, x_size, params, use_reentrant=False)
+        return self._forward_impl(x, x_size, params)
+
+    def _forward_impl(self, x, x_size, params):
         for blk in self.blocks:
             x = blk(x, x_size, params["rpi_sa"], params["attn_mask"])
 
