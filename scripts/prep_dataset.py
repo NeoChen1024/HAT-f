@@ -63,17 +63,29 @@ def _crop_worker(args):
 
     total = len(xs) * len(ys)
     idx = 0
-    for x in xs:
-        for y in ys:
-            idx += 1
-            patch = img[x : x + crop_size, y : y + crop_size]
-            patch = np.ascontiguousarray(patch)
-            out_name = f"{base}_s{idx:03d}.png"
-            cv2.imwrite(
-                os.path.join(save_folder, out_name),
-                patch,
-                [cv2.IMWRITE_PNG_COMPRESSION, compression],
-            )
+    if save_folder is not None:
+        for x in xs:
+            for y in ys:
+                idx += 1
+                patch = img[x : x + crop_size, y : y + crop_size]
+                patch = np.ascontiguousarray(patch)
+                out_name = f"{base}_s{idx:03d}.png"
+                cv2.imwrite(
+                    os.path.join(save_folder, out_name),
+                    patch,
+                    [cv2.IMWRITE_PNG_COMPRESSION, compression],
+                )
+    else:
+        patches = []
+        for x in xs:
+            for y in ys:
+                idx += 1
+                patch = img[x : x + crop_size, y : y + crop_size]
+                ok, png_bytes = cv2.imencode(".png", patch,
+                                              [cv2.IMWRITE_PNG_COMPRESSION, compression])
+                key = f"{base}_s{idx:03d}"
+                patches.append((key, png_bytes, crop_size, crop_size))
+        return base, total, crop_size, crop_size, patches
 
     return base, total, crop_size, crop_size
 
@@ -120,10 +132,10 @@ def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, worke
     if mode == "paired":
         _paired_mode(input_dir, output_dir, scale, workers, compression)
     else:
-        _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file)
+        _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, meta_file)
 
-    if lmdb:
-        _make_lmdb(output_dir, workers, compression)
+    if lmdb and not (mode == "train"):
+        _make_lmdb_dirs(output_dir, workers, compression)
 
 
 def _scan_mode(input_dir, crop_size, workers):
@@ -211,52 +223,95 @@ def _paired_mode(input_dir, output_dir, scale, workers, compression):
     print(f"  dataroot_lq: {lq_dir}")
 
 
-def _make_lmdb(image_dir, workers, compress_level):
+def _stream_to_lmdb(results_iter, output_dir, compress_level, workers):
+    lmdb_path = output_dir.rstrip("/") + ".lmdb"
+    os.makedirs(lmdb_path, exist_ok=True)
+
+    import lmdb
+
+    env = lmdb.open(lmdb_path, map_size=1024**4)  # 1 TB
+
+    total_patches = 0
+    skipped = []
+    txn = env.begin(write=True)
+    meta_path = os.path.join(lmdb_path, "meta_info.txt")
+    meta_f = open(meta_path, "w")
+    batch = 5000
+    idx = 0
+
+    for result in results_iter:
+        if len(result) == 4:
+            name, n, h, w = result
+            if n < 0:
+                skipped.append((name, h, w))
+            # no patches (n could be from file-mode, already written to disk)
+        else:
+            name, n, h, w, patches = result
+            if n < 0:
+                skipped.append((name, h, w))
+                continue
+            for key, png_bytes, ph, pw in patches:
+                txn.put(key.encode("ascii"), png_bytes.tobytes())
+                meta_f.write(f"{key}.png ({ph},{pw},3) {compress_level}\n")
+                total_patches += 1
+                idx += 1
+                if idx % batch == 0:
+                    txn.commit()
+                    txn = env.begin(write=True)
+
+    txn.commit()
+    meta_f.close()
+    env.close()
+
+    if skipped:
+        print(f"\nWARNING: {len(skipped)} images skipped (smaller than crop_size):")
+        for name, h, w in skipped[:10]:
+            print(f"  {name}  ({h}x{w})")
+        if len(skipped) > 10:
+            print(f"  ... and {len(skipped) - 10} more")
+
+    print(f"\nDone. {total_patches} patches saved to {lmdb_path}")
+    print(f"Meta info: {total_patches} entries in {meta_path}")
+    print()
+    print("Ready for training. Add to your YAML:")
+    print(f"  dataroot_gt: {lmdb_path}")
+    print(f"  io_backend:")
+    print(f"    type: lmdb")
+
+
+def _make_lmdb_dirs(image_dir, workers, compress_level):
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "BasicSR-f"))
     from basicsr.utils.lmdb_util import make_lmdb_from_imgs
-    from basicsr.utils import scandir
 
-    if os.path.basename(image_dir) in ("GTmod4", "LRbicx4"):
+    subdirs = [os.path.join(image_dir, d) for d in sorted(os.listdir(image_dir))
+               if os.path.isdir(os.path.join(image_dir, d))]
+    if not subdirs:
         subdirs = [image_dir]
-    else:
-        subdirs = [image_dir] if not os.path.isdir(os.path.join(image_dir, "GTmod4")) else [
-            os.path.join(image_dir, d) for d in os.listdir(image_dir)
-            if os.path.isdir(os.path.join(image_dir, d)) and d != "meta_info.txt"
-        ]
-        if not subdirs or subdirs == [image_dir]:
-            subdirs = [image_dir]
 
     for src_dir in subdirs:
-        if not os.path.isdir(src_dir):
-            continue
-        lmdb_path = src_dir.rstrip("/") + ".lmdb"
         names = sorted(f for f in os.listdir(src_dir) if f.lower().endswith(".png"))
         if not names:
             continue
-
         keys = [os.path.splitext(n)[0] for n in names]
-        paths = names
+        lmdb_path = src_dir.rstrip("/") + ".lmdb"
 
-        print(f"\nConverting {src_dir} → {lmdb_path}  ({len(paths)} images)")
+        print(f"\nConverting {src_dir} → {lmdb_path}  ({len(names)} images)")
         make_lmdb_from_imgs(
-            data_path=src_dir,
-            lmdb_path=lmdb_path,
-            img_path_list=paths,
-            keys=keys,
-            batch=5000,
+            data_path=src_dir, lmdb_path=lmdb_path,
+            img_path_list=names, keys=keys, batch=5000,
             compress_level=compress_level,
         )
-
         shutil.rmtree(src_dir)
         print(f"Removed {src_dir}")
 
 
-def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file):
+def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, meta_file):
     if meta_file is None:
         meta_file = os.path.join(output_dir, "meta_info.txt")
 
     if not no_crop:
-        os.makedirs(output_dir, exist_ok=True)
+        if not lmdb:
+            os.makedirs(output_dir, exist_ok=True)
 
         paths = _scandir_images(input_dir)
         if not paths:
@@ -269,27 +324,29 @@ def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, co
         print()
 
         tasks = [
-            (p, crop_size, step, thresh_size, output_dir, compression)
+            (p, crop_size, step, thresh_size, None if lmdb else output_dir, compression)
             for p in paths
         ]
 
         total_patches = 0
         skipped = []
         with Pool(workers) as pool:
-            results = list(
-                tqdm(
-                    pool.imap_unordered(_crop_worker, tasks),
-                    total=len(tasks),
-                    desc="Cropping",
-                    unit="img",
-                    smoothing=0.3,
-                )
+            results = tqdm(
+                pool.imap_unordered(_crop_worker, tasks),
+                total=len(tasks),
+                desc="Cropping",
+                unit="img",
+                smoothing=0.3,
             )
-            for name, n, h, w in results:
-                if n < 0:
-                    skipped.append((name, h, w))
-                else:
-                    total_patches += n
+            if lmdb:
+                _stream_to_lmdb(results, output_dir, compression, workers)
+                return
+            else:
+                for name, n, h, w in list(results):
+                    if n < 0:
+                        skipped.append((name, h, w))
+                    else:
+                        total_patches += n
 
         if skipped:
             print(f"\nWARNING: {len(skipped)} images skipped (smaller than crop_size={crop_size}):")
