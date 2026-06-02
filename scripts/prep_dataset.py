@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 
 def _sanitize_name(name):
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
 
 def _modcrop(img, scale):
