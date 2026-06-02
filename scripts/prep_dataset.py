@@ -119,9 +119,10 @@ def _generate_meta_info(image_dir, meta_path):
 @click.option("--compression", default=3, show_default=True, help="PNG compression level (0-9)")
 @click.option("--no-crop", is_flag=True, help="Skip cropping; only generate meta_info")
 @click.option("--lmdb", is_flag=True, help="Convert output to LMDB format (deletes PNGs afterwards)")
+@click.option("--lmdb-batch", default=5000, show_default=True, help="Patches per LMDB transaction (train mode)")
 @click.option("--dry-run", is_flag=True, help="Only scan and report image sizes")
 @click.option("--meta-file", "-m", default=None, help="Meta info output path (train mode)")
-def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, dry_run, meta_file):
+def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, lmdb_batch, dry_run, meta_file):
     if dry_run:
         _scan_mode(input_dir, crop_size, workers)
         return
@@ -132,7 +133,7 @@ def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, worke
     if mode == "paired":
         _paired_mode(input_dir, output_dir, scale, workers, compression)
     else:
-        _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, meta_file)
+        _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, lmdb_batch, meta_file)
 
     if lmdb and not (mode == "train"):
         _make_lmdb_dirs(output_dir, workers, compression)
@@ -223,7 +224,7 @@ def _paired_mode(input_dir, output_dir, scale, workers, compression):
     print(f"  dataroot_lq: {lq_dir}")
 
 
-def _stream_to_lmdb(results_iter, output_dir, compress_level, workers):
+def _stream_to_lmdb(results_iter, output_dir, compress_level, batch):
     lmdb_path = output_dir.rstrip("/") + ".lmdb"
     os.makedirs(lmdb_path, exist_ok=True)
 
@@ -236,7 +237,6 @@ def _stream_to_lmdb(results_iter, output_dir, compress_level, workers):
     txn = env.begin(write=True)
     meta_path = os.path.join(lmdb_path, "meta_info.txt")
     meta_f = open(meta_path, "w")
-    batch = 5000
     idx = 0
 
     for result in results_iter:
@@ -305,7 +305,7 @@ def _make_lmdb_dirs(image_dir, workers, compress_level):
         print(f"Removed {src_dir}")
 
 
-def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, meta_file):
+def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, lmdb_batch, meta_file):
     if meta_file is None:
         meta_file = os.path.join(output_dir, "meta_info.txt")
 
@@ -339,7 +339,7 @@ def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, co
                 smoothing=0.3,
             )
             if lmdb:
-                _stream_to_lmdb(results, output_dir, compression, workers)
+                _stream_to_lmdb(results, output_dir, compression, lmdb_batch)
                 return
             else:
                 for name, n, h, w in list(results):
