@@ -31,6 +31,15 @@ class HATModel(SRModel):
             self.log_dict["grad_max"] = grad_max
             self.log_dict["weight_norm"] = weight_norm_sq**0.5
 
+            # EMA loss (decay=0.99)
+            l_pix = self.log_dict.get("l_pix", None)
+            if l_pix is not None:
+                if not hasattr(self, "ema_loss") or self.ema_loss is None:
+                    self.ema_loss = l_pix
+                else:
+                    self.ema_loss = 0.99 * self.ema_loss + 0.01 * l_pix
+                self.log_dict["l_pix_ema"] = self.ema_loss
+
     def get_current_log(self):
         log = dict(super().get_current_log()) if hasattr(self, "log_dict") and self.log_dict else {}
         g = self.optimizers[0].param_groups[0]
