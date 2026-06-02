@@ -9,6 +9,8 @@ Three modes:
 
 import os
 import re
+import sys
+import shutil
 import click
 import cv2
 import numpy as np
@@ -104,9 +106,10 @@ def _generate_meta_info(image_dir, meta_path):
 @click.option("--workers", "-w", default=8, show_default=True, help="Parallel threads")
 @click.option("--compression", default=3, show_default=True, help="PNG compression level (0-9)")
 @click.option("--no-crop", is_flag=True, help="Skip cropping; only generate meta_info")
+@click.option("--lmdb", is_flag=True, help="Convert output to LMDB format (deletes PNGs afterwards)")
 @click.option("--dry-run", is_flag=True, help="Only scan and report image sizes")
 @click.option("--meta-file", "-m", default=None, help="Meta info output path (train mode)")
-def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, workers, compression, no_crop, dry_run, meta_file):
+def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, workers, compression, no_crop, lmdb, dry_run, meta_file):
     if dry_run:
         _scan_mode(input_dir, crop_size, workers)
         return
@@ -118,6 +121,9 @@ def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, worke
         _paired_mode(input_dir, output_dir, scale, workers, compression)
     else:
         _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file)
+
+    if lmdb:
+        _make_lmdb(output_dir, workers, compression)
 
 
 def _scan_mode(input_dir, crop_size, workers):
@@ -203,6 +209,46 @@ def _paired_mode(input_dir, output_dir, scale, workers, compression):
     print("Ready for validation. Add to your YAML:")
     print(f"  dataroot_gt: {gt_dir}")
     print(f"  dataroot_lq: {lq_dir}")
+
+
+def _make_lmdb(image_dir, workers, compress_level):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "BasicSR-f"))
+    from basicsr.utils.lmdb_util import make_lmdb_from_imgs
+    from basicsr.utils import scandir
+
+    if os.path.basename(image_dir) in ("GTmod4", "LRbicx4"):
+        subdirs = [image_dir]
+    else:
+        subdirs = [image_dir] if not os.path.isdir(os.path.join(image_dir, "GTmod4")) else [
+            os.path.join(image_dir, d) for d in os.listdir(image_dir)
+            if os.path.isdir(os.path.join(image_dir, d)) and d != "meta_info.txt"
+        ]
+        if not subdirs or subdirs == [image_dir]:
+            subdirs = [image_dir]
+
+    for src_dir in subdirs:
+        if not os.path.isdir(src_dir):
+            continue
+        lmdb_path = src_dir.rstrip("/") + ".lmdb"
+        names = sorted(f for f in os.listdir(src_dir) if f.lower().endswith(".png"))
+        if not names:
+            continue
+
+        keys = [os.path.splitext(n)[0] for n in names]
+        paths = names
+
+        print(f"\nConverting {src_dir} → {lmdb_path}  ({len(paths)} images)")
+        make_lmdb_from_imgs(
+            data_path=src_dir,
+            lmdb_path=lmdb_path,
+            img_path_list=paths,
+            keys=keys,
+            batch=5000,
+            compress_level=compress_level,
+        )
+
+        shutil.rmtree(src_dir)
+        print(f"Removed {src_dir}")
 
 
 def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file):
