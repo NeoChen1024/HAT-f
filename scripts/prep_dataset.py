@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare a cropped image dataset from raw high-resolution images.
+"""Prepare image datasets for HAT-f training.
 
-Usage: from a directory of raw HR images, this script:
-  1. Crops each image into overlapping sub-images via sliding window
-  2. Generates a meta_info.txt file (required by ImageNetPairedDataset)
-
-The output is ready for HAT-f training with `ImageNetPairedDataset`:
-  dataroot_gt: <output-dir>
-  meta_info_file: <output-dir>/meta_info.txt
+Three modes:
+  train    Crop HR images into sub-images + generate meta_info (ImageNetPairedDataset)
+  paired   Generate GT (mod-cropped) + LR (bicubic) pairs (PairedImageDataset)
+  scan     Only scan and report image sizes (--dry-run)
 """
 
 import os
@@ -16,6 +13,11 @@ import cv2
 import numpy as np
 from multiprocessing import Pool
 from tqdm import tqdm
+
+
+def _modcrop(img, scale):
+    h, w = img.shape[:2]
+    return img[: h - h % scale, : w - w % scale]
 
 
 def _scandir_images(folder):
@@ -86,55 +88,119 @@ def _generate_meta_info(image_dir, meta_path):
 
 
 @click.command()
-@click.option("--input-dir", "-i", default=None, help="Directory of raw HR source images (required unless --no-crop)")
-@click.option("--output-dir", "-o", default=None, help="Directory for cropped sub-images (required unless --dry-run)")
-@click.option("--crop-size", "-s", default=480, show_default=True, help="Sub-image crop size (px)")
-@click.option("--step", "-p", default=240, show_default=True, help="Sliding window step (px)")
+@click.option("--input-dir", "-i", default=None, help="Directory of source images")
+@click.option("--output-dir", "-o", default=None, help="Output directory (required unless --dry-run)")
+@click.option("--mode", "-M", type=click.Choice(["train", "paired"]), default="train", show_default=True,
+              help="train=crop sub-images+meta_info | paired=GT+LR pairs")
+@click.option("--scale", "-x", default=4, show_default=True, help="Downscale factor (paired mode)")
+@click.option("--crop-size", "-s", default=480, show_default=True, help="Sub-image crop size (train mode)")
+@click.option("--step", "-p", default=240, show_default=True, help="Sliding window step (train mode)")
 @click.option("--thresh-size", default=240, show_default=True, help="Discard edge patches narrower than this")
-@click.option("--workers", "-w", default=8, show_default=True, help="Parallel crop threads")
+@click.option("--workers", "-w", default=8, show_default=True, help="Parallel threads")
 @click.option("--compression", default=3, show_default=True, help="PNG compression level (0-9)")
-@click.option("--no-crop", is_flag=True, help="Skip cropping; only generate meta_info for existing images")
-@click.option("--dry-run", is_flag=True, help="Only scan and report image sizes; no cropping or meta_info")
-@click.option("--meta-file", "-m", default=None, help="Meta info output path (default: <output-dir>/meta_info.txt)")
-def main(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, dry_run, meta_file):
-    if not dry_run and not output_dir:
+@click.option("--no-crop", is_flag=True, help="Skip cropping; only generate meta_info")
+@click.option("--dry-run", is_flag=True, help="Only scan and report image sizes")
+@click.option("--meta-file", "-m", default=None, help="Meta info output path (train mode)")
+def main(input_dir, output_dir, mode, scale, crop_size, step, thresh_size, workers, compression, no_crop, dry_run, meta_file):
+    if dry_run:
+        _scan_mode(input_dir, crop_size, workers)
+        return
+
+    if not output_dir:
         raise click.UsageError("--output-dir is required (unless --dry-run)")
 
-    if dry_run:
-        paths = _scandir_images(input_dir)
-        if not paths:
-            print(f"No images found in {input_dir}")
-            return
+    if mode == "paired":
+        _paired_mode(input_dir, output_dir, scale, workers, compression)
+    else:
+        _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file)
 
-        tasks = [(p, crop_size) for p in paths]
 
-        small = []
-        total = 0
-        sz_dist = {}
-        with Pool(workers) as pool:
-            for name, h, w in tqdm(
-                pool.imap_unordered(_size_worker, tasks),
-                total=len(tasks), desc="Scanning", unit="img"
-            ):
-                if h < crop_size or w < crop_size:
-                    small.append((name, h, w))
-                else:
-                    total += 1
-                bucket = h // 100 * 100
-                sz_dist[bucket] = sz_dist.get(bucket, 0) + 1
-
-        print(f"\nTotal: {len(tasks)} images")
-        print(f"Skipped (<{crop_size}px): {len(small)}")
-        print(f"Usable (>= {crop_size}px): {total}")
-        print(f"\nSize distribution (height):")
-        for lo in sorted(sz_dist):
-            print(f"  {lo:>5}-{lo+99:<5}px: {sz_dist[lo]:>6}")
-
-        if small:
-            print(f"\nImages smaller than {crop_size}px:")
-            for name, h, w in sorted(small, key=lambda x: min(x[1], x[2])):
-                print(f"  {name:40s} ({h}x{w})")
+def _scan_mode(input_dir, crop_size, workers):
+    paths = _scandir_images(input_dir)
+    if not paths:
+        print(f"No images found in {input_dir}")
         return
+
+    tasks = [(p, crop_size) for p in paths]
+
+    small = []
+    total = 0
+    sz_dist = {}
+    with Pool(workers) as pool:
+        for name, h, w in tqdm(
+            pool.imap_unordered(_size_worker, tasks),
+            total=len(tasks), desc="Scanning", unit="img"
+        ):
+            if h < crop_size or w < crop_size:
+                small.append((name, h, w))
+            else:
+                total += 1
+            bucket = h // 100 * 100
+            sz_dist[bucket] = sz_dist.get(bucket, 0) + 1
+
+    print(f"\nTotal: {len(tasks)} images")
+    print(f"Skipped (<{crop_size}px): {len(small)}")
+    print(f"Usable (>= {crop_size}px): {total}")
+    print(f"\nSize distribution (height):")
+    for lo in sorted(sz_dist):
+        print(f"  {lo:>5}-{lo+99:<5}px: {sz_dist[lo]:>6}")
+
+    if small:
+        print(f"\nImages smaller than {crop_size}px:")
+        for name, h, w in sorted(small, key=lambda x: min(x[1], x[2])):
+            print(f"  {name:40s} ({h}x{w})")
+
+
+def _paired_worker(args):
+    path, scale, gt_dir, lq_dir, compression = args
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    base = os.path.splitext(os.path.basename(path))[0]
+
+    img = _modcrop(img, scale)
+    h, w = img.shape[:2]
+    lq = cv2.resize(img, (w // scale, h // scale), interpolation=cv2.INTER_CUBIC)
+
+    cv2.imwrite(os.path.join(gt_dir, f"{base}.png"), img,
+                [cv2.IMWRITE_PNG_COMPRESSION, compression])
+    cv2.imwrite(os.path.join(lq_dir, f"{base}.png"), lq,
+                [cv2.IMWRITE_PNG_COMPRESSION, compression])
+    return base, h, w, h // scale, w // scale
+
+
+def _paired_mode(input_dir, output_dir, scale, workers, compression):
+    gt_dir = os.path.join(output_dir, "GTmod4")
+    lq_dir = os.path.join(output_dir, f"LRbicx{scale}")
+    os.makedirs(gt_dir, exist_ok=True)
+    os.makedirs(lq_dir, exist_ok=True)
+
+    paths = _scandir_images(input_dir)
+    if not paths:
+        print(f"ERROR: no images found in {input_dir}")
+        return
+
+    print(f"Input:  {len(paths)} source images in {input_dir}")
+    print(f"Output: {gt_dir}")
+    print(f"        {lq_dir}")
+    print(f"Mode:   paired, scale={scale}, mod crop + bicubic downscale")
+    print()
+
+    tasks = [(p, scale, gt_dir, lq_dir, compression) for p in paths]
+    with Pool(workers) as pool:
+        for _ in tqdm(
+            pool.imap_unordered(_paired_worker, tasks),
+            total=len(tasks), desc="Paired", unit="img"
+        ):
+            pass
+
+    print(f"\nDone. GT saved to {gt_dir}")
+    print(f"      LR saved to {lq_dir}")
+    print()
+    print("Ready for validation. Add to your YAML:")
+    print(f"  dataroot_gt: {gt_dir}")
+    print(f"  dataroot_lq: {lq_dir}")
+
+
+def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, compression, no_crop, meta_file):
     if meta_file is None:
         meta_file = os.path.join(output_dir, "meta_info.txt")
 
