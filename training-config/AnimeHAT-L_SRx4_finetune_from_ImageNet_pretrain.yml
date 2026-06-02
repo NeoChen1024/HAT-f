@@ -1,5 +1,5 @@
 # general settings
-name: train_HAT-L_SRx4_finetune_from_ImageNet_pretrain
+name: AnimeHAT-L_SRx4_finetune_from_ImageNet_pretrain
 model_type: HATModel
 scale: 4
 num_gpu: auto
