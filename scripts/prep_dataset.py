@@ -134,7 +134,7 @@ def _scan_mode(input_dir, crop_size, workers):
     with Pool(workers) as pool:
         for name, h, w in tqdm(
             pool.imap_unordered(_size_worker, tasks),
-            total=len(tasks), desc="Scanning", unit="img"
+            total=len(tasks), desc="Scanning", unit="img", smoothing=0.3,
         ):
             if h < crop_size or w < crop_size:
                 small.append((name, h, w))
@@ -193,7 +193,7 @@ def _paired_mode(input_dir, output_dir, scale, workers, compression):
     with Pool(workers) as pool:
         for _ in tqdm(
             pool.imap_unordered(_paired_worker, tasks),
-            total=len(tasks), desc="Paired", unit="img"
+            total=len(tasks), desc="Paired", unit="img", smoothing=0.3,
         ):
             pass
 
@@ -236,6 +236,7 @@ def _train_mode(input_dir, output_dir, crop_size, step, thresh_size, workers, co
                     total=len(tasks),
                     desc="Cropping",
                     unit="img",
+                    smoothing=0.3,
                 )
             )
             for name, n, h, w in results:
