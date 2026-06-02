@@ -139,10 +139,15 @@ Run: `python3 scripts/bench_train_speed.py -b 6 -a 1 -w 2 -t 15`
   recomputes them during backward instead of saving/loading them from VRAM. On Ada GPUs the
   tensor core throughput (~300 TFLOPS) far exceeds memory bandwidth (~736 GB/s), so
   recompute wins over memory fetch.
+  **FIXED 2026-06-02: `use_checkpoint` was dead code** — the flag was stored but
+  `checkpoint.checkpoint()` was never called in any forward method. Without it,
+  HAT-L batch=4 used 23.9 GiB VRAM. With the fix, batch=4 uses 3.4 GiB (7.8x reduction).
+  See `hat/archs/hat_arch.py:554` (AttenBlocks.forward).
 - **AMP removed**: FP16 produces NaN (Q@K^T and Conv2d overflow 65504), BF16 gives <10% speedup.
   Pure FP32 is simpler and more reliable for HAT.
 - **torch.compile reduces VRAM ~40%** via op fusion and memory reuse. Training without
   compile at batch=4 can exceed 20 GiB; with compile it drops to ~11 GiB.
+  With use_checkpoint=True (now actually functional), batch=4 uses only 3.4 GiB.
 - **PyTorch 2.12 inductor GPU hang**: during batch inference with many tiles, inductor may
   cause GPU hang. Use `--compile eager` or `--compile aot_eager` in `scripts/batch_infer.py`.
 
