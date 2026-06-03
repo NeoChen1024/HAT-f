@@ -134,13 +134,13 @@ Run: `python3 scripts/bench_train_speed.py -b 6 -a 1 -w 2 -t 15`
 |---|---|---|
 | no checkpoint | ~321 ms | **~157 ms** (~2.0x) |
 
-- **Activation checkpointing (`use_checkpoint=True`) is slightly faster** (~3%).
+- **Activation checkpointing (`use_checkpoint=True`) trades ~24% speed for ~8x VRAM reduction**
+  (HAT-L batch=4: 23.9 GiB → 3.4 GiB, batch=6: ~3.75s/step vs ~3.02s without).
   HAT's attention intermediate activations (W-MSA scores, OCAB scores) are large; checkpointing
-  recomputes them during backward instead of saving/loading them from VRAM. On Ada GPUs the
-  tensor core throughput (~300 TFLOPS) far exceeds memory bandwidth (~736 GB/s), so
-  recompute wins over memory fetch.
+  recomputes them during backward instead of saving/loading them from VRAM.
   **FIXED 2026-06-02: `use_checkpoint` was dead code** — the flag was stored but
-  `checkpoint.checkpoint()` was never called in any forward method. Without it,
+  `checkpoint.checkpoint()` was never called in any forward method. Prior benchmark
+  claiming "+3% speedup" was invalid (both runs were identical). Without the fix,
   HAT-L batch=4 used 23.9 GiB VRAM. With the fix, batch=4 uses 3.4 GiB (7.8x reduction).
   See `hat/archs/hat_arch.py:554` (AttenBlocks.forward).
 - **AMP removed**: FP16 produces NaN (Q@K^T and Conv2d overflow 65504), BF16 gives <10% speedup.
