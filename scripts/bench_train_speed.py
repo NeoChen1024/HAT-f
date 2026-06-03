@@ -72,7 +72,7 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 
-def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, timing, use_checkpoint, master_port, is_master, compile_backend):
+def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, timing, use_checkpoint, master_port, is_master):
     if world_size > 1:
         setup_ddp(rank, world_size, master_port)
 
@@ -85,15 +85,7 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
     criterion = nn.L1Loss()
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, betas=(0.9, 0.99))
 
-    if compile_backend == "tensorrt":
-        import torch_tensorrt  # noqa: F401  registers backend
-        model = torch.compile(model, dynamic=False, backend="torch_tensorrt", options={"enabled_precisions": {torch.float}})  # type: ignore[call-arg]
-    elif compile_backend == "eager":
-        pass  # no compile
-    elif compile_backend == "aot_eager":
-        model = torch.compile(model, dynamic=False, backend="aot_eager")
-    else:
-        model = torch.compile(model, dynamic=False)
+    model = torch.compile(model, dynamic=False)
 
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
@@ -187,14 +179,7 @@ def bench_worker(rank, world_size, batch_size, accum_steps, gt_size, warmup, tim
 @click.option("--gpus", "-g", default="0", show_default=True, help="Comma-separated GPU IDs, e.g. 0,1,2,3")
 @click.option("--use-checkpoint/--no-checkpoint", default=False, help="Use activation checkpointing")
 @click.option("--master-port", default=29500, show_default=True, help="DDP master port")
-@click.option(
-    "--compile-backend",
-    type=click.Choice(["inductor", "eager", "aot_eager", "tensorrt"]),
-    default="inductor",
-    show_default=True,
-    help="torch.compile backend",
-)
-def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, master_port, compile_backend):
+def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint, master_port):
     if not torch.cuda.is_available():
         print("ERROR: CUDA not available")
         sys.exit(1)
@@ -212,7 +197,7 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
     print(f"GPUs: {gpu_ids} (world_size={world_size})", flush=True)
     print(f"Config: HAT SRx4, embed_dim=180, window_size=16, depths=6x6, heads=6", flush=True)
     print(f"        gt_size={gt_size}, batch={batch_size}, accum={accum_steps}, eff_batch={effective_batch}", flush=True)
-    print(f"        FP32, torch.compile ({compile_backend}), checkpoint={ckpt}", flush=True)
+    print(f"        FP32, torch.compile, NCHW, checkpoint={ckpt}", flush=True)
     print(f"        warmup={warmup}, timing={timing} iters each", flush=True)
     print(flush=True)
 
@@ -220,7 +205,7 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
         mp.spawn(
             bench_worker,
-            args=(world_size, batch_size, accum_steps, gt_size, warmup, timing, use_checkpoint, master_port, False, compile_backend),
+            args=(world_size, batch_size, accum_steps, gt_size, warmup, timing, use_checkpoint, master_port, False),
             nprocs=world_size,
         )
     else:
@@ -236,7 +221,6 @@ def main(batch_size, accum_steps, gt_size, warmup, timing, gpus, use_checkpoint,
             use_checkpoint,
             master_port,
             True,
-            compile_backend,
         )
 
 
