@@ -12,6 +12,11 @@ compile:
   backend: inductor
   dynamic: false
 
+# tiled inference for validation (saves VRAM on non-256x256 images)
+tile:
+  tile_size: 256
+  tile_pad: 32
+
 # dataset and data loader settings
 datasets:
   train:
@@ -60,6 +65,7 @@ network_g:
   mlp_ratio: 2
   upsampler: 'pixelshuffle'
   resi_connection: '1conv'
+  use_checkpoint: true
 
 # path
 path:
