@@ -101,6 +101,8 @@ python3 scripts/batch_infer.py -i input/ -o output/
 # Choose compile backend (eager = no compile, avoids GPU hang on PyTorch 2.12)
 python3 scripts/batch_infer.py -i input/ -o output/ --compile eager
 python3 scripts/batch_infer.py -i input/ -o output/ --compile aot_eager
+# TensorRT backend (requires pip install torch-tensorrt)
+python3 scripts/batch_infer.py -i input/ -o output/ --compile tensorrt
 ```
 
 Supports `--device auto|cuda|xpu|cpu`, `--model-variant HAT|HAT-S|HAT-L`,
@@ -113,11 +115,18 @@ Configured via YAML `compile:` block in training config (added to `SRModel.__ini
 ```yaml
 compile:
   mode: default           # default | reduce-overhead | max-autotune
-  backend: inductor       # inductor | aot_eager | eager
+  backend: inductor       # inductor | aot_eager | eager | tensorrt
   dynamic: false          # must be false for HAT (static shapes)
+  # options:               # TensorRT-specific options (optional)
+  #   enabled_precisions: {torch.float}
+  #   debug: false
 ```
 
 No manual code changes needed. Omit the block entirely to skip compilation.
+
+When `backend: tensorrt` is set, `torch_tensorrt` is auto-imported to register the
+backend, and `enabled_precisions: {torch.float}` (FP32) is the default to match HAT's
+pure-FP32 training requirement.
 
 The `self.mean` buffer mutation in `HAT.forward` was fixed (using a local variable instead
 of `self.mean = self.mean.type_as(x)`) — without this fix, `torch.compile` recompiles on
@@ -129,6 +138,8 @@ TF32 tensor cores, which gives a further ~10% speedup on Ampere/Ada GPUs.
 ### Benchmark results (RTX 4080 SUPER, HAT SRx4, gt_size=256, batch=6, FP32)
 
 Run: `python3 scripts/bench_train_speed.py -b 6 -a 1 -w 2 -t 15`
+
+Supports `--compile-backend inductor|eager|aot_eager|tensorrt`.
 
 | | eager | torch.compile |
 |---|---|---|
@@ -173,3 +184,4 @@ Run: `python3 scripts/bench_train_speed.py -b 6 -a 1 -w 2 -t 15`
 - **`self.mean` buffer fix for `torch.compile`**: The original `self.mean = self.mean.type_as(x)` in `HAT.forward` reassigns a registered buffer during forward, which caused `torch.compile` recompilation on every call. Fixed by using a local variable (`mean = self.mean.type_as(x)`), see `hat/archs/hat_arch.py:1001`.
 - **AMP removed**: HAT's attention Q@K^T and Conv2d intermediate values can overflow FP16 (max 65504), producing NaN. BF16 has same exponent range as FP32 but only ~10% speedup. Pure FP32 is simpler and more reliable.
 - **PyTorch 2.12 inductor GPU hang**: During batch inference with many tiles, `torch.compile` inductor backend may cause GPU hang. Use `--compile eager` or `--compile aot_eager` in `scripts/batch_infer.py`.
+- **TensorRT backend**: Requires `pip install torch-tensorrt`. `torch_tensorrt` must be imported before `torch.compile(backend="torch_tensorrt")` to register the backend. Defaults to FP32-only (`enabled_precisions: {torch.float}`) to match HAT's architecture constraints. Supports YAML `compile.options:` for additional Torch-TRT settings.

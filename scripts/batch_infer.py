@@ -155,7 +155,11 @@ def load_model(model_path, compile_mode, tile_size, tile_pad, device, variant="H
     state = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(extract_state_dict(state), strict=True)
     model.eval()
-    if compile_mode == "aot_eager":
+    if compile_mode == "tensorrt":
+        import torch_tensorrt  # noqa: F401  registers backend
+        trt_options = {"enabled_precisions": {torch.float}, "debug": False}
+        model = torch.compile(model, dynamic=False, backend="torch_tensorrt", options=trt_options)  # type: ignore[call-arg]
+    elif compile_mode == "aot_eager":
         model = torch.compile(model, dynamic=False, backend="aot_eager")
     elif compile_mode in ("reduce-overhead", "max-autotune"):
         model = torch.compile(model, dynamic=False, mode=compile_mode)
@@ -306,7 +310,7 @@ def _validate_workers(ctx, param, value):
 @click.option("--quality", "-q", default=95, show_default=True, help="WebP quality (1-100)", callback=_validate_quality)
 @click.option(
     "--compile", "compile_mode",
-    type=click.Choice(["eager", "aot_eager", "default", "reduce-overhead", "max-autotune"]),
+    type=click.Choice(["eager", "aot_eager", "default", "reduce-overhead", "max-autotune", "tensorrt"]),
     default="default",
     show_default=True,
     help="torch.compile backend (eager = no compile)",
