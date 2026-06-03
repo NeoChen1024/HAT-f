@@ -134,15 +134,14 @@ Run: `python3 scripts/bench_train_speed.py -b 6 -a 1 -w 2 -t 15`
 |---|---|---|
 | no checkpoint | ~321 ms | **~157 ms** (~2.0x) |
 
-- **Activation checkpointing (`use_checkpoint=True`) trades ~24% speed for ~8x VRAM reduction**
-  (HAT-L batch=4: 23.9 GiB → 3.4 GiB, batch=6: ~3.75s/step vs ~3.02s without).
+- **Activation checkpointing (`use_checkpoint=True`) trades ~24% speed for ~4.5x VRAM reduction**
+  (HAT batch=6: 25 GiB → 5.6 GiB, ~3.02s/step → ~3.75s/step).
   HAT's attention intermediate activations (W-MSA scores, OCAB scores) are large; checkpointing
   recomputes them during backward instead of saving/loading them from VRAM.
   **FIXED 2026-06-02: `use_checkpoint` was dead code** — the flag was stored but
   `checkpoint.checkpoint()` was never called in any forward method. Prior benchmark
   claiming "+3% speedup" was invalid (both runs were identical). Without the fix,
-  HAT-L batch=4 used 23.9 GiB VRAM. With the fix, batch=4 uses 3.4 GiB (7.8x reduction).
-  See `hat/archs/hat_arch.py:554` (AttenBlocks.forward).
+  HAT batch=6 used 25 GiB VRAM. With the fix, batch=6 uses 5.6 GiB.
 - **AMP removed**: FP16 produces NaN (Q@K^T and Conv2d overflow 65504), BF16 gives <10% speedup.
   Pure FP32 is simpler and more reliable for HAT.
 - **torch.compile reduces VRAM ~40%** via op fusion and memory reuse. Training without
